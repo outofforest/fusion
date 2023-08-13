@@ -27,14 +27,14 @@ func Run[TKey, TValue any, THash comparable](
 ) error {
 	defer close(resultCh)
 
-	return parallel.Run(ctx, func(ctx context.Context, spawn parallel.SpawnFn) error {
+	revisionStore := newRevisionDiffStore[TKey, TValue, THash](store, hashingFunc)
+
+	err := parallel.Run(ctx, func(ctx context.Context, spawn parallel.SpawnFn) error {
 		availableWorkerCh := make(chan struct{}, nWorkers)
 		for i := 0; i < nWorkers; i++ {
 			availableWorkerCh <- struct{}{}
 		}
 		taskCh := make(chan task[TKey, TValue, THash], nWorkers)
-
-		revisionStore := newRevisionDiffStore[TKey, TValue, THash](store, hashingFunc)
 
 		spawn("taskDistributor", parallel.Exit, func(ctx context.Context) error {
 			defer func() {
@@ -79,35 +79,28 @@ func Run[TKey, TValue any, THash comparable](
 		})
 		for i := 0; i < nWorkers; i++ {
 			spawn(fmt.Sprintf("worker-%d", i), parallel.Continue, func(ctx context.Context) error {
+			loop:
 				for task := range taskCh {
 				taskLoop:
 					for {
 						taskStore := newTaskDiffStore[TKey, TValue, THash](task.TaskIndex, revisionStore, hashingFunc)
 
-						var err error
+						var errHandler error
 						func() {
 							defer func() {
 								if r := recover(); r != nil {
-									err = PanicError{Value: r}
+									if err, ok := r.(error); ok {
+										errHandler = err
+									} else {
+										errHandler = errors.New(fmt.Sprintf("panic: %s", r))
+									}
 								}
 							}()
-							err = task.HandlerFunc(ctx, taskStore)
+							errHandler = task.HandlerFunc(ctx, taskStore)
 						}()
 
-						if err != nil {
-							select {
-							case <-task.TaskReadyCh:
-							default:
-							}
-							task.TaskReadyCh <- task.TaskIndex
-
-							resultCh <- err
-							availableWorkerCh <- struct{}{}
-							return errors.WithStack(ctx.Err())
-						}
-
 						for {
-							err := revisionStore.applyDiff(taskStore)
+							err := revisionStore.mergeTaskDiff(errHandler, taskStore)
 							switch {
 							case err == nil:
 								select {
@@ -116,9 +109,9 @@ func Run[TKey, TValue any, THash comparable](
 								}
 								task.TaskReadyCh <- task.TaskIndex
 
-								resultCh <- nil
+								resultCh <- errHandler
 								availableWorkerCh <- struct{}{}
-								return errors.WithStack(ctx.Err())
+								continue loop
 							case errors.Is(err, errInconsistentRead):
 								continue taskLoop
 							case errors.Is(err, errAwaitingPreviousTask):
@@ -140,4 +133,12 @@ func Run[TKey, TValue any, THash comparable](
 
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	revisionStore.applyTo(store)
+
+	// returning ctx.Err() is important to not save inconsistent results in case execution has been canceled
+	return errors.WithStack(ctx.Err())
 }
