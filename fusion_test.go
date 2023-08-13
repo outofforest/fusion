@@ -23,7 +23,6 @@ type testStore struct {
 	data map[string]uint64
 }
 
-//nolint:unused
 func newTestStore() testStore {
 	return testStore{
 		data: map[string]uint64{},

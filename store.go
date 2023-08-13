@@ -90,7 +90,7 @@ func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(err error, store 
 	s.taskIndex = store.taskIndex
 
 	if err != nil {
-		return nil
+		return nil //nolint:nilerr
 	}
 
 	for hash, diff := range store.diff {

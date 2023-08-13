@@ -92,7 +92,7 @@ func Run[TKey, TValue any, THash comparable](
 									if err, ok := r.(error); ok {
 										errHandler = err
 									} else {
-										errHandler = errors.New(fmt.Sprintf("panic: %s", r))
+										errHandler = errors.Errorf("panic: %s", r)
 									}
 								}
 							}()
