@@ -77,6 +77,8 @@ linters:
     - golint
     - nosnakecase
     - depguard
+    - structcheck
+    - deadcode
 
 linters-settings:
   nakedret:
