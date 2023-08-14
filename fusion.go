@@ -84,7 +84,6 @@ func Run[TKey, TValue any, THash comparable](
 				taskLoop:
 					for {
 						taskStore := newTaskDiffStore[TKey, TValue, THash](task.TaskIndex, revisionStore, hashingFunc)
-
 						var errHandler error
 						func() {
 							defer func() {
