@@ -38,7 +38,7 @@ type revisionDiffStore[TKey, TValue any, THash comparable] struct {
 	mu         sync.RWMutex
 	taskIndex  uint64
 	diff       map[THash]revisionDiff[TKey, TValue]
-	diffHashes []THash
+	diffHashes *list[THash]
 }
 
 func newRevisionDiffStore[TKey, TValue any, THash comparable](
@@ -49,6 +49,7 @@ func newRevisionDiffStore[TKey, TValue any, THash comparable](
 		parentStore: parentStore,
 		hashingFunc: hashingFunc,
 		diff:        map[THash]revisionDiff[TKey, TValue]{},
+		diffHashes:  newList[THash](),
 	}
 }
 
@@ -93,15 +94,18 @@ func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(err error, store 
 		return nil //nolint:nilerr
 	}
 
-	for hash, diff := range store.diff {
-		if _, exists := s.diff[hash]; !exists {
-			s.diffHashes = append(s.diffHashes, hash)
-		}
-		s.diff[hash] = revisionDiff[TKey, TValue]{
-			TaskIndex: store.taskIndex,
-			Key:       diff.Key,
-			Value:     diff.Value,
-			Deleted:   diff.Deleted,
+	for item := store.diffHashes.Tail; item != nil; item = item.Previous {
+		for _, hash := range item.Slice {
+			if _, exists := s.diff[hash]; !exists {
+				s.diffHashes.Append(hash)
+			}
+			diff := store.diff[hash]
+			s.diff[hash] = revisionDiff[TKey, TValue]{
+				TaskIndex: store.taskIndex,
+				Key:       diff.Key,
+				Value:     diff.Value,
+				Deleted:   diff.Deleted,
+			}
 		}
 	}
 
@@ -109,12 +113,14 @@ func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(err error, store 
 }
 
 func (s *revisionDiffStore[TKey, TValue, THash]) applyTo(store Store[TKey, TValue]) {
-	for _, hash := range s.diffHashes {
-		diff := s.diff[hash]
-		if diff.Deleted {
-			store.Delete(diff.Key)
-		} else {
-			store.Set(diff.Key, diff.Value)
+	for item := s.diffHashes.Tail; item != nil; item = item.Previous {
+		for _, hash := range item.Slice {
+			diff := s.diff[hash]
+			if diff.Deleted {
+				store.Delete(diff.Key)
+			} else {
+				store.Set(diff.Key, diff.Value)
+			}
 		}
 	}
 }
@@ -125,6 +131,7 @@ type taskDiffStore[TKey, TValue any, THash comparable] struct {
 	hashingFunc HashingFunc[TKey, THash]
 	get         map[THash]keyValue[TKey, TValue]
 	diff        map[THash]taskDiff[TKey, TValue]
+	diffHashes  *list[THash]
 }
 
 func newTaskDiffStore[TKey, TValue any, THash comparable](
@@ -138,6 +145,7 @@ func newTaskDiffStore[TKey, TValue any, THash comparable](
 		hashingFunc: hashingFunc,
 		get:         map[THash]keyValue[TKey, TValue]{},
 		diff:        map[THash]taskDiff[TKey, TValue]{},
+		diffHashes:  newList[THash](),
 	}
 }
 
@@ -161,14 +169,22 @@ func (s *taskDiffStore[TKey, TValue, THash]) Get(key TKey) (TValue, bool) {
 }
 
 func (s *taskDiffStore[TKey, TValue, THash]) Set(key TKey, value TValue) {
-	s.diff[s.hashingFunc(key)] = taskDiff[TKey, TValue]{
+	hash := s.hashingFunc(key)
+	if _, exists := s.diff[hash]; !exists {
+		s.diffHashes.Append(hash)
+	}
+	s.diff[hash] = taskDiff[TKey, TValue]{
 		Key:   key,
 		Value: value,
 	}
 }
 
 func (s *taskDiffStore[TKey, TValue, THash]) Delete(key TKey) {
-	s.diff[s.hashingFunc(key)] = taskDiff[TKey, TValue]{
+	hash := s.hashingFunc(key)
+	if _, exists := s.diff[hash]; !exists {
+		s.diffHashes.Append(hash)
+	}
+	s.diff[hash] = taskDiff[TKey, TValue]{
 		Key:     key,
 		Deleted: true,
 	}
