@@ -5,9 +5,11 @@ import (
 )
 
 type revisionDiff[TKey, TValue any] struct {
-	Key    TKey
-	Value  TValue
-	Exists bool
+	Key     TKey
+	Value   TValue
+	Exists  bool
+	Updated bool
+	Events  map[chan<- struct{}]uint64
 }
 
 type taskDiff[TKey, TValue any] struct {
@@ -21,9 +23,8 @@ type revisionDiffStore[TKey, TValue any, THash comparable] struct {
 	parentStore Store[TKey, TValue]
 	hashingFunc HashingFunc[TKey, THash]
 
-	mu        sync.RWMutex
+	mu        sync.Mutex
 	taskIndex uint64
-	events    map[THash]map[chan<- struct{}]uint64
 	cache     map[THash]revisionDiff[TKey, TValue]
 	diffList  *list[THash]
 }
@@ -35,7 +36,6 @@ func newRevisionDiffStore[TKey, TValue any, THash comparable](
 	return &revisionDiffStore[TKey, TValue, THash]{
 		parentStore: parentStore,
 		hashingFunc: hashingFunc,
-		events:      map[THash]map[chan<- struct{}]uint64{},
 		cache:       map[THash]revisionDiff[TKey, TValue]{},
 		diffList:    newList[THash](),
 	}
@@ -45,23 +45,25 @@ func (s *revisionDiffStore[TKey, TValue, THash]) Get(eventCh chan<- struct{}, ke
 	hash := s.hashingFunc(key)
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if _, exists := s.events[hash][eventCh]; !exists {
-		if s.events[hash] == nil {
-			s.events[hash] = map[chan<- struct{}]uint64{}
+	diff, exists := s.cache[hash]
+	if !exists {
+		value, exists := s.parentStore.Get(key)
+		diff = revisionDiff[TKey, TValue]{
+			Key:    key,
+			Value:  value,
+			Exists: exists,
+			Events: map[chan<- struct{}]uint64{
+				eventCh: s.taskIndex,
+			},
 		}
-		s.events[hash][eventCh] = s.taskIndex
+		s.cache[hash] = diff
+	} else if _, exists := diff.Events[eventCh]; !exists {
+		diff.Events[eventCh] = s.taskIndex
 	}
 
-	if diff, exists := s.cache[hash]; exists {
-		s.mu.Unlock()
-		return diff.Value, diff.Exists
-	}
-
-	s.mu.Unlock()
-
-	value, exists := s.parentStore.Get(key)
-	return value, exists
+	return diff.Value, diff.Exists
 }
 
 func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(store *taskDiffStore[TKey, TValue, THash]) {
@@ -72,41 +74,47 @@ func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(store *taskDiffSt
 
 	for item := store.readList.Head; item != nil; item = item.Next {
 		for _, hash := range item.Slice {
-			delete(s.events[hash], store.eventCh)
-			if len(s.events[hash]) == 0 {
-				delete(s.events, hash)
-			}
+			delete(s.cache[hash].Events, store.eventCh)
 		}
 	}
 
 	sentEvents := map[chan<- struct{}]struct{}{}
 	for item := store.diffList.Head; item != nil; item = item.Next {
 		for _, hash := range item.Slice {
-			if _, exists := s.cache[hash]; !exists {
-				s.diffList.Append(hash)
-			}
-			diff := store.cache[hash]
-			s.cache[hash] = revisionDiff[TKey, TValue]{
-				Key:    diff.Key,
-				Value:  diff.Value,
-				Exists: diff.Exists,
-			}
+			diff, exists := s.cache[hash]
+			diffNew := store.cache[hash]
+			if exists {
+				diff.Value = diffNew.Value
+				diff.Exists = diffNew.Exists
 
-			for eventCh, taskIndex := range s.events[hash] {
-				if store.taskIndex > taskIndex {
-					if _, exists := sentEvents[eventCh]; !exists {
-						select {
-						case eventCh <- struct{}{}:
-						default:
-						}
-
-						sentEvents[eventCh] = struct{}{}
-					}
-					delete(s.events[hash], eventCh)
+				if !diff.Updated {
+					s.diffList.Append(hash)
+					diff.Updated = true
 				}
-			}
-			if len(s.events[hash]) == 0 {
-				delete(s.events, hash)
+
+				s.cache[hash] = diff
+
+				for eventCh, taskIndex := range diff.Events {
+					if store.taskIndex > taskIndex {
+						if _, exists := sentEvents[eventCh]; !exists {
+							select {
+							case eventCh <- struct{}{}:
+							default:
+							}
+
+							sentEvents[eventCh] = struct{}{}
+						}
+						delete(diff.Events, eventCh)
+					}
+				}
+			} else {
+				s.diffList.Append(hash)
+				s.cache[hash] = revisionDiff[TKey, TValue]{
+					Key:    diffNew.Key,
+					Value:  diffNew.Value,
+					Exists: diffNew.Exists,
+					Events: map[chan<- struct{}]uint64{},
+				}
 			}
 		}
 	}
@@ -118,10 +126,7 @@ func (s *revisionDiffStore[TKey, TValue, THash]) cleanEvents(store *taskDiffStor
 
 	for item := store.readList.Head; item != nil; item = item.Next {
 		for _, hash := range item.Slice {
-			delete(s.events[hash], store.eventCh)
-			if len(s.events[hash]) == 0 {
-				delete(s.events, hash)
-			}
+			delete(s.cache[hash].Events, store.eventCh)
 		}
 	}
 }

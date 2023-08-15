@@ -8,7 +8,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-const nWorkers = 50
+const nWorkers = 10
 
 type task[TKey, TValue any, THash comparable] struct {
 	TaskIndex   uint64
