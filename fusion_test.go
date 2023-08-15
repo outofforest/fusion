@@ -2,7 +2,6 @@ package fusion
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
@@ -22,7 +21,6 @@ type store = Store[string, uint64]
 var _ store = &testStore{}
 
 type testStore struct {
-	mu   sync.RWMutex
 	data map[string]uint64
 }
 
@@ -33,24 +31,15 @@ func newTestStore() *testStore {
 }
 
 func (s *testStore) Get(key string) (uint64, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	v, exists := s.data[key]
 	return v, exists
 }
 
 func (s *testStore) Set(key string, value uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.data[key] = value
 }
 
 func (s *testStore) Delete(key string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	delete(s.data, key)
 }
 
