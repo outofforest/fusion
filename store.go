@@ -9,7 +9,7 @@ type revisionDiff[TKey, TValue any] struct {
 	Value   TValue
 	Exists  bool
 	Updated bool
-	Events  map[chan<- struct{}]uint64
+	Events  map[chan<- struct{}]struct{}
 }
 
 type taskDiff[TKey, TValue any] struct {
@@ -54,13 +54,13 @@ func (s *revisionDiffStore[TKey, TValue, THash]) Get(eventCh chan<- struct{}, ke
 			Key:    key,
 			Value:  value,
 			Exists: exists,
-			Events: map[chan<- struct{}]uint64{
-				eventCh: s.taskIndex,
+			Events: map[chan<- struct{}]struct{}{
+				eventCh: {},
 			},
 		}
 		s.cache[hash] = diff
 	} else if _, exists := diff.Events[eventCh]; !exists {
-		diff.Events[eventCh] = s.taskIndex
+		diff.Events[eventCh] = struct{}{}
 	}
 
 	return diff.Value, diff.Exists
@@ -94,18 +94,16 @@ func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(store *taskDiffSt
 
 				s.cache[hash] = diff
 
-				for eventCh, taskIndex := range diff.Events {
-					if store.taskIndex > taskIndex {
-						if _, exists := sentEvents[eventCh]; !exists {
-							select {
-							case eventCh <- struct{}{}:
-							default:
-							}
-
-							sentEvents[eventCh] = struct{}{}
+				for eventCh := range diff.Events {
+					if _, exists := sentEvents[eventCh]; !exists {
+						select {
+						case eventCh <- struct{}{}:
+						default:
 						}
-						delete(diff.Events, eventCh)
+
+						sentEvents[eventCh] = struct{}{}
 					}
+					delete(diff.Events, eventCh)
 				}
 			} else {
 				s.diffList.Append(hash)
@@ -113,7 +111,7 @@ func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(store *taskDiffSt
 					Key:    diffNew.Key,
 					Value:  diffNew.Value,
 					Exists: diffNew.Exists,
-					Events: map[chan<- struct{}]uint64{},
+					Events: map[chan<- struct{}]struct{}{},
 				}
 			}
 		}
