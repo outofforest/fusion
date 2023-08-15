@@ -8,13 +8,14 @@ import (
 	"github.com/pkg/errors"
 )
 
-const nWorkers = 5
+const nWorkers = 50
 
 type task[TKey, TValue any, THash comparable] struct {
-	TaskIndex       uint64
-	HandlerFunc     HandlerFunc[TKey, TValue]
-	PrevTaskReadyCh <-chan struct{}
-	TaskReadyCh     chan<- struct{}
+	TaskIndex   uint64
+	HandlerFunc HandlerFunc[TKey, TValue]
+	RedoCh      chan struct{}
+	MergeCh     <-chan struct{}
+	NextMergeCh chan<- struct{}
 }
 
 // Run executes handlers.
@@ -75,9 +76,9 @@ func taskDistributor[TKey, TValue any, THash comparable](
 	var handlerFunc HandlerFunc[TKey, TValue]
 	var ok bool
 
-	prevTaskReadyCh := make(chan struct{})
-	close(prevTaskReadyCh)
-	taskReadyCh := make(chan struct{}, 1)
+	mergeCh := make(chan struct{})
+	close(mergeCh)
+	nextMergeCh := make(chan struct{}, 1)
 
 	// 1 is here because 0 means that value was read from persistent store
 	for taskIndex := uint64(1); ; taskIndex++ {
@@ -93,14 +94,15 @@ func taskDistributor[TKey, TValue any, THash comparable](
 		}
 
 		taskCh <- task[TKey, TValue, THash]{
-			TaskIndex:       taskIndex,
-			HandlerFunc:     handlerFunc,
-			PrevTaskReadyCh: prevTaskReadyCh,
-			TaskReadyCh:     taskReadyCh,
+			TaskIndex:   taskIndex,
+			HandlerFunc: handlerFunc,
+			RedoCh:      make(chan struct{}, 1),
+			MergeCh:     mergeCh,
+			NextMergeCh: nextMergeCh,
 		}
 
-		prevTaskReadyCh = taskReadyCh
-		taskReadyCh = make(chan struct{}, 1)
+		mergeCh = nextMergeCh
+		nextMergeCh = make(chan struct{}, 1)
 	}
 }
 
@@ -112,11 +114,10 @@ func worker[TKey, TValue any, THash comparable](
 	availableWorkerCh chan<- struct{},
 	revisionStore *revisionDiffStore[TKey, TValue, THash],
 ) error {
-loop:
+mainLoop:
 	for task := range taskCh {
-	taskLoop:
 		for {
-			taskStore := newTaskDiffStore[TKey, TValue, THash](task.TaskIndex, revisionStore, hashingFunc)
+			taskStore := newTaskDiffStore[TKey, TValue, THash](task.TaskIndex, task.RedoCh, revisionStore, hashingFunc)
 			var errHandler error
 			func() {
 				defer func() {
@@ -131,28 +132,30 @@ loop:
 				errHandler = task.HandlerFunc(ctx, taskStore)
 			}()
 
-			for {
-				err := revisionStore.mergeTaskDiff(errHandler, taskStore)
-				switch err {
-				case errAwaitingPreviousTask:
-					<-task.PrevTaskReadyCh
-
-					select {
-					case task.TaskReadyCh <- struct{}{}:
-					default:
-					}
-				case errInconsistentRead:
-					continue taskLoop
+			select {
+			case <-ctx.Done():
+				availableWorkerCh <- struct{}{}
+				return errors.WithStack(ctx.Err())
+			case <-task.RedoCh:
+				revisionStore.cleanEvents(taskStore)
+				continue
+			case <-task.MergeCh:
+				select {
+				case <-task.RedoCh:
+					revisionStore.cleanEvents(taskStore)
+					continue
 				default:
-					select {
-					case task.TaskReadyCh <- struct{}{}:
-					default:
-					}
-
-					resultCh <- errHandler
-					availableWorkerCh <- struct{}{}
-					continue loop
 				}
+
+				if errHandler == nil {
+					revisionStore.mergeTaskDiff(taskStore)
+				}
+
+				resultCh <- errHandler
+				close(task.NextMergeCh)
+				availableWorkerCh <- struct{}{}
+
+				continue mainLoop
 			}
 		}
 	}

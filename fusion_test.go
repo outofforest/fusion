@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/outofforest/logger"
 	"github.com/outofforest/parallel"
@@ -307,6 +308,9 @@ func TestTwoTasksWithoutRepeating(t *testing.T) {
 	results := do(ctx, requireT, s,
 		func() {
 			<-msg1.WritingDoneCh
+
+			time.Sleep(500 * time.Microsecond)
+
 			msg2.DoReadingCh <- struct{}{}
 			msg2.DoWritingCh <- struct{}{}
 		},
