@@ -133,8 +133,17 @@ loop:
 
 			for {
 				err := revisionStore.mergeTaskDiff(errHandler, taskStore)
-				switch {
-				case err == nil:
+				switch err {
+				case errAwaitingPreviousTask:
+					<-task.PrevTaskReadyCh
+
+					select {
+					case task.TaskReadyCh <- struct{}{}:
+					default:
+					}
+				case errInconsistentRead:
+					continue taskLoop
+				default:
 					select {
 					case task.TaskReadyCh <- struct{}{}:
 					default:
@@ -143,15 +152,6 @@ loop:
 					resultCh <- errHandler
 					availableWorkerCh <- struct{}{}
 					continue loop
-				case errors.Is(err, errInconsistentRead):
-					continue taskLoop
-				case errors.Is(err, errAwaitingPreviousTask):
-					<-task.PrevTaskReadyCh
-
-					select {
-					case task.TaskReadyCh <- struct{}{}:
-					default:
-					}
 				}
 			}
 		}
