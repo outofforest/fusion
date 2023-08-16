@@ -47,7 +47,6 @@ type eventRead[THash comparable] struct {
 }
 
 type eventMerged[THash comparable] struct {
-	ReadList *list[THash]
 	DiffList *list[THash]
 	Ch       chan<- struct{}
 	Error    error
@@ -68,19 +67,14 @@ func (s *revisionDiffStore[TKey, TValue, THash]) RunEvents(ctx context.Context) 
 			chs.Append(e.Ch)
 		case eventMerged[THash]:
 			if e.Error == nil {
-				sentEvents := map[chan<- struct{}]struct{}{}
 				for item := e.DiffList.Head; item != nil; item = item.Next {
 					for _, hash := range item.Slice {
 						if l := events[hash]; l != nil {
 							for chs := l.Head; chs != nil; chs = chs.Next {
 								for _, ch := range chs.Slice {
-									if _, exists := sentEvents[ch]; !exists {
-										select {
-										case ch <- struct{}{}:
-										default:
-										}
-
-										sentEvents[ch] = struct{}{}
+									select {
+									case ch <- struct{}{}:
+									default:
 									}
 								}
 							}
@@ -138,7 +132,6 @@ func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(errHandler error,
 	}
 
 	s.eventCh <- eventMerged[THash]{
-		ReadList: store.readList,
 		DiffList: store.diffList,
 		Ch:       store.eventCh,
 		Error:    errHandler,
@@ -166,23 +159,18 @@ type taskDiffStore[TKey, TValue any, THash comparable] struct {
 	hashingFunc HashingFunc[TKey, THash]
 	cache       map[THash]taskDiff[TKey, TValue]
 	diffList    *list[THash]
-	readList    *list[THash]
 }
 
 func newTaskDiffStore[TKey, TValue any, THash comparable](
 	taskIndex uint64,
-	eventCh chan<- struct{},
 	parentStore *revisionDiffStore[TKey, TValue, THash],
 	hashingFunc HashingFunc[TKey, THash],
 ) *taskDiffStore[TKey, TValue, THash] {
 	return &taskDiffStore[TKey, TValue, THash]{
 		taskIndex:   taskIndex,
-		eventCh:     eventCh,
 		parentStore: parentStore,
 		hashingFunc: hashingFunc,
-		cache:       map[THash]taskDiff[TKey, TValue]{},
 		diffList:    newList[THash](),
-		readList:    newList[THash](),
 	}
 }
 
@@ -193,7 +181,6 @@ func (s *taskDiffStore[TKey, TValue, THash]) Get(key TKey) (TValue, bool) {
 	}
 
 	value, exists := s.parentStore.Get(s.eventCh, key)
-	s.readList.Append(hash)
 	s.cache[hash] = taskDiff[TKey, TValue]{
 		Key:    key,
 		Value:  value,
@@ -239,4 +226,10 @@ func (s *taskDiffStore[TKey, TValue, THash]) Delete(key TKey) {
 		s.diffList.Append(hash)
 	}
 	s.cache[hash] = diff
+}
+
+func (s *taskDiffStore[TKey, TValue, THash]) Reset(eventCh chan<- struct{}) {
+	s.eventCh = eventCh
+	s.cache = map[THash]taskDiff[TKey, TValue]{}
+	s.diffList.Reset()
 }

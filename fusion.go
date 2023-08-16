@@ -8,12 +8,11 @@ import (
 	"github.com/pkg/errors"
 )
 
-const nWorkers = 5
+const nWorkers = 50
 
 type task[TKey, TValue any, THash comparable] struct {
 	TaskIndex   uint64
 	HandlerFunc HandlerFunc[TKey, TValue]
-	RedoCh      chan struct{}
 	MergeCh     <-chan struct{}
 	NextMergeCh chan<- struct{}
 }
@@ -100,7 +99,6 @@ func taskDistributor[TKey, TValue any, THash comparable](
 		taskCh <- task[TKey, TValue, THash]{
 			TaskIndex:   taskIndex,
 			HandlerFunc: handlerFunc,
-			RedoCh:      make(chan struct{}, 1),
 			MergeCh:     mergeCh,
 			NextMergeCh: nextMergeCh,
 		}
@@ -120,8 +118,10 @@ func worker[TKey, TValue any, THash comparable](
 ) error {
 mainLoop:
 	for task := range taskCh {
+		taskStore := newTaskDiffStore[TKey, TValue, THash](task.TaskIndex, revisionStore, hashingFunc)
 		for {
-			taskStore := newTaskDiffStore[TKey, TValue, THash](task.TaskIndex, task.RedoCh, revisionStore, hashingFunc)
+			redoCh := make(chan struct{}, 1)
+			taskStore.Reset(redoCh)
 			var errHandler error
 			func() {
 				defer func() {
@@ -140,11 +140,11 @@ mainLoop:
 			case <-ctx.Done():
 				availableWorkerCh <- struct{}{}
 				return errors.WithStack(ctx.Err())
-			case <-task.RedoCh:
+			case <-redoCh:
 				continue
 			case <-task.MergeCh:
 				select {
-				case <-task.RedoCh:
+				case <-redoCh:
 					continue
 				default:
 				}
