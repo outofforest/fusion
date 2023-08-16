@@ -8,7 +8,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-const nWorkers = 50
+const nWorkers = 5
 
 type task[TKey, TValue any, THash comparable] struct {
 	TaskIndex   uint64
@@ -151,12 +151,7 @@ mainLoop:
 				default:
 				}
 
-				if errHandler == nil {
-					revisionStore.mergeTaskDiff(taskStore)
-				} else {
-					revisionStore.cleanEvents(taskStore)
-				}
-				revisionStore.mergeNext(task.NextMergeCh)
+				revisionStore.mergeTaskDiff(errHandler, task.NextMergeCh, taskStore)
 
 				resultCh <- errHandler
 				availableWorkerCh <- struct{}{}

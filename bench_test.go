@@ -15,25 +15,25 @@ var keys = []string{
 }
 
 func handler(ctx context.Context, store Store[string, uint64]) error {
-	key1 := keys[rand.Intn(len(keys))] + keys[rand.Intn(len(keys))]
-	key2 := keys[rand.Intn(len(keys))] + keys[rand.Intn(len(keys))]
-	key3 := keys[rand.Intn(len(keys))] + keys[rand.Intn(len(keys))]
-	key4 := keys[rand.Intn(len(keys))] + keys[rand.Intn(len(keys))]
-	key5 := keys[rand.Intn(len(keys))] + keys[rand.Intn(len(keys))]
+	key1 := keys[rand.Intn(len(keys))]
+	key2 := keys[rand.Intn(len(keys))]
+	key3 := keys[rand.Intn(len(keys))]
+	key4 := keys[rand.Intn(len(keys))]
+	key5 := keys[rand.Intn(len(keys))]
 	keyRand := key1 + key2 + key3 + key4 + key5
 
 	store.Get(keyRand)
 	store.Set(keyRand, 0)
 
 	store.Get(key1)
-	//store.Get(key2)
-	//store.Get(key3)
+	store.Get(key2)
+	store.Get(key3)
 
 	store.Set(key1, 0)
 	store.Set(key2, 0)
 
-	//store.Get(key4)
-	//store.Get(key5)
+	store.Get(key4)
+	store.Get(key5)
 
 	store.Set(key3, 0)
 	store.Set(key4, 0)

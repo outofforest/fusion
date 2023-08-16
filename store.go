@@ -50,15 +50,13 @@ type eventMerged[THash comparable] struct {
 	ReadList *list[THash]
 	DiffList *list[THash]
 	Ch       chan<- struct{}
+	Error    error
+	NextCh   chan<- struct{}
 }
 
 type eventClean[THash comparable] struct {
 	ReadList *list[THash]
 	Ch       chan<- struct{}
-}
-
-type eventMergeNext struct {
-	Ch chan<- struct{}
 }
 
 func (s *revisionDiffStore[TKey, TValue, THash]) RunEvents(ctx context.Context) error {
@@ -84,26 +82,30 @@ func (s *revisionDiffStore[TKey, TValue, THash]) RunEvents(ctx context.Context) 
 				}
 			}
 
-			sentEvents := map[chan<- struct{}]struct{}{}
-			for item := e.DiffList.Head; item != nil; item = item.Next {
-				for _, hash := range item.Slice {
-					eventChs := events[hash]
-					for eventCh := range eventChs {
-						if _, exists := sentEvents[eventCh]; !exists {
-							select {
-							case eventCh <- struct{}{}:
-							default:
-							}
+			if e.Error == nil {
+				sentEvents := map[chan<- struct{}]struct{}{}
+				for item := e.DiffList.Head; item != nil; item = item.Next {
+					for _, hash := range item.Slice {
+						eventChs := events[hash]
+						for eventCh := range eventChs {
+							if _, exists := sentEvents[eventCh]; !exists {
+								select {
+								case eventCh <- struct{}{}:
+								default:
+								}
 
-							sentEvents[eventCh] = struct{}{}
-						}
-						delete(eventChs, eventCh)
-						if len(eventChs) == 0 {
-							delete(events, hash)
+								sentEvents[eventCh] = struct{}{}
+							}
+							delete(eventChs, eventCh)
+							if len(eventChs) == 0 {
+								delete(events, hash)
+							}
 						}
 					}
 				}
 			}
+
+			close(e.NextCh)
 		case eventClean[THash]:
 			for item := e.ReadList.Head; item != nil; item = item.Next {
 				for _, hash := range item.Slice {
@@ -113,8 +115,6 @@ func (s *revisionDiffStore[TKey, TValue, THash]) RunEvents(ctx context.Context) 
 					}
 				}
 			}
-		case eventMergeNext:
-			close(e.Ch)
 		}
 	}
 
@@ -124,13 +124,13 @@ func (s *revisionDiffStore[TKey, TValue, THash]) RunEvents(ctx context.Context) 
 func (s *revisionDiffStore[TKey, TValue, THash]) Get(eventCh chan<- struct{}, key TKey) (TValue, bool) {
 	hash := s.hashingFunc(key)
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	s.eventCh <- eventRead[THash]{
 		Hash: hash,
 		Ch:   eventCh,
 	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	if diff, exists := s.cache[hash]; exists {
 		return diff.Value, diff.Exists
@@ -140,28 +140,33 @@ func (s *revisionDiffStore[TKey, TValue, THash]) Get(eventCh chan<- struct{}, ke
 	return value, exists
 }
 
-func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(store *taskDiffStore[TKey, TValue, THash]) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(errHandler error, nextCh chan<- struct{}, store *taskDiffStore[TKey, TValue, THash]) {
+	if errHandler == nil {
+		s.mu.Lock()
 
-	for item := store.diffList.Head; item != nil; item = item.Next {
-		for _, hash := range item.Slice {
-			if _, exists := s.cache[hash]; !exists {
-				s.diffList.Append(hash)
-			}
-			diff := store.cache[hash]
-			s.cache[hash] = revisionDiff[TKey, TValue]{
-				Key:    diff.Key,
-				Value:  diff.Value,
-				Exists: diff.Exists,
+		for item := store.diffList.Head; item != nil; item = item.Next {
+			for _, hash := range item.Slice {
+				if _, exists := s.cache[hash]; !exists {
+					s.diffList.Append(hash)
+				}
+				diff := store.cache[hash]
+				s.cache[hash] = revisionDiff[TKey, TValue]{
+					Key:    diff.Key,
+					Value:  diff.Value,
+					Exists: diff.Exists,
+				}
 			}
 		}
+
+		s.mu.Unlock()
 	}
 
 	s.eventCh <- eventMerged[THash]{
 		ReadList: store.readList,
 		DiffList: store.diffList,
 		Ch:       store.eventCh,
+		Error:    errHandler,
+		NextCh:   nextCh,
 	}
 }
 
@@ -169,12 +174,6 @@ func (s *revisionDiffStore[TKey, TValue, THash]) cleanEvents(store *taskDiffStor
 	s.eventCh <- eventClean[THash]{
 		ReadList: store.readList,
 		Ch:       store.eventCh,
-	}
-}
-
-func (s *revisionDiffStore[TKey, TValue, THash]) mergeNext(ch chan<- struct{}) {
-	s.eventCh <- eventMergeNext{
-		Ch: ch,
 	}
 }
 
