@@ -3,6 +3,7 @@ package fusion
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/outofforest/parallel"
 	"github.com/pkg/errors"
@@ -15,6 +16,53 @@ type task[TKey, TValue any, THash comparable] struct {
 	HandlerFunc     HandlerFunc[TKey, TValue]
 	PrevTaskReadyCh <-chan struct{}
 	MergeNextTaskCh chan<- struct{}
+}
+
+type state[TKey, TValue any, THash comparable] struct {
+	mu              sync.Mutex
+	taskIndex       uint64
+	handlerCh       <-chan HandlerFunc[TKey, TValue]
+	prevTaskReadyCh chan struct{}
+	mergeNextTaskCh chan struct{}
+}
+
+func newState[TKey, TValue any, THash comparable](
+	handlerCh <-chan HandlerFunc[TKey, TValue],
+) *state[TKey, TValue, THash] {
+	prevTaskReadyCh := make(chan struct{})
+	close(prevTaskReadyCh)
+	return &state[TKey, TValue, THash]{
+		handlerCh:       handlerCh,
+		prevTaskReadyCh: prevTaskReadyCh,
+		mergeNextTaskCh: make(chan struct{}, 1),
+	}
+}
+
+func (s *state[TKey, TValue, THash]) Next(ctx context.Context) (task[TKey, TValue, THash], bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return task[TKey, TValue, THash]{}, false, errors.WithStack(ctx.Err())
+	case handlerFunc, ok := <-s.handlerCh:
+		if !ok {
+			return task[TKey, TValue, THash]{}, false, nil
+		}
+
+		s.taskIndex++
+		t := task[TKey, TValue, THash]{
+			TaskIndex:       s.taskIndex,
+			HandlerFunc:     handlerFunc,
+			PrevTaskReadyCh: s.prevTaskReadyCh,
+			MergeNextTaskCh: s.mergeNextTaskCh,
+		}
+
+		s.prevTaskReadyCh = s.mergeNextTaskCh
+		s.mergeNextTaskCh = make(chan struct{}, 1)
+
+		return t, true, nil
+	}
 }
 
 // Run executes handlers.
@@ -30,18 +78,10 @@ func Run[TKey, TValue any, THash comparable](
 	revisionStore := newRevisionDiffStore[TKey, TValue, THash](store, hashingFunc)
 
 	err := parallel.Run(ctx, func(ctx context.Context, spawn parallel.SpawnFn) error {
-		availableWorkerCh := make(chan struct{}, nWorkers)
-		for i := 0; i < nWorkers; i++ {
-			availableWorkerCh <- struct{}{}
-		}
-		taskCh := make(chan task[TKey, TValue, THash], nWorkers)
-
-		spawn("taskDistributor", parallel.Exit, func(ctx context.Context) error {
-			return taskDistributor[TKey, TValue, THash](ctx, handlerCh, taskCh, availableWorkerCh)
-		})
+		state := newState[TKey, TValue, THash](handlerCh)
 		for i := 0; i < nWorkers; i++ {
 			spawn(fmt.Sprintf("worker-%d", i), parallel.Continue, func(ctx context.Context) error {
-				return worker[TKey, TValue, THash](ctx, hashingFunc, taskCh, resultCh, availableWorkerCh, revisionStore)
+				return worker[TKey, TValue, THash](ctx, hashingFunc, state, resultCh, revisionStore)
 			})
 		}
 
@@ -57,63 +97,20 @@ func Run[TKey, TValue any, THash comparable](
 	return errors.WithStack(ctx.Err())
 }
 
-func taskDistributor[TKey, TValue any, THash comparable](
-	ctx context.Context,
-	handlerCh <-chan HandlerFunc[TKey, TValue],
-	taskCh chan<- task[TKey, TValue, THash],
-	availableWorkerCh chan struct{},
-) error {
-	defer func() {
-		close(taskCh)
-
-		// -1 is here because one item is always taken from `availableWorkerCh` in the main `for` loop below.
-		for i := 0; i < nWorkers-1; i++ {
-			<-availableWorkerCh
-		}
-	}()
-
-	var handlerFunc HandlerFunc[TKey, TValue]
-	var ok bool
-
-	prevTaskReadyCh := make(chan struct{})
-	close(prevTaskReadyCh)
-	mergeNextTaskCh := make(chan struct{}, 1)
-
-	// 1 is here because 0 means that value was read from persistent store
-	for taskIndex := uint64(1); ; taskIndex++ {
-		<-availableWorkerCh
-
-		select {
-		case <-ctx.Done():
-			return errors.WithStack(ctx.Err())
-		case handlerFunc, ok = <-handlerCh:
-			if !ok {
-				return errors.WithStack(ctx.Err())
-			}
-		}
-
-		taskCh <- task[TKey, TValue, THash]{
-			TaskIndex:       taskIndex,
-			HandlerFunc:     handlerFunc,
-			PrevTaskReadyCh: prevTaskReadyCh,
-			MergeNextTaskCh: mergeNextTaskCh,
-		}
-
-		prevTaskReadyCh = mergeNextTaskCh
-		mergeNextTaskCh = make(chan struct{}, 1)
-	}
-}
-
 func worker[TKey, TValue any, THash comparable](
 	ctx context.Context,
 	hashingFunc HashingFunc[TKey, THash],
-	taskCh <-chan task[TKey, TValue, THash],
+	state *state[TKey, TValue, THash],
 	resultCh chan<- error,
-	availableWorkerCh chan<- struct{},
 	revisionStore *revisionDiffStore[TKey, TValue, THash],
 ) error {
 mainLoop:
-	for task := range taskCh {
+	for {
+		task, ok, err := state.Next(ctx)
+		if !ok || err != nil {
+			return err
+		}
+
 		for {
 			taskStore := newTaskDiffStore[TKey, TValue, THash](task.TaskIndex, revisionStore, hashingFunc)
 			var errHandler error
@@ -139,12 +136,9 @@ mainLoop:
 				continue
 			default:
 				resultCh <- errHandler
-				availableWorkerCh <- struct{}{}
 				close(task.MergeNextTaskCh)
 				continue mainLoop
 			}
 		}
 	}
-
-	return nil
 }
