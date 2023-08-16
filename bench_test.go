@@ -14,11 +14,17 @@ var keys = []string{
 	"zulu",
 }
 
+func randKey() string {
+	b := make([]byte, 10)
+	rand.Read(b)
+	return string(b)
+}
+
 func handler(ctx context.Context, store Store[string, uint64]) error {
-	key1 := keys[rand.Intn(len(keys))]
-	key2 := keys[rand.Intn(len(keys))]
-	key3 := keys[rand.Intn(len(keys))]
-	key4 := keys[rand.Intn(len(keys))]
+	key1 := randKey() // keys[rand.Intn(len(keys))]
+	key2 := randKey() // keys[rand.Intn(len(keys))]
+	key3 := randKey() // keys[rand.Intn(len(keys))]
+	key4 := randKey() // keys[rand.Intn(len(keys))]
 	key5 := keys[rand.Intn(len(keys))]
 	keyRand := key1 + key2 + key3 + key4 + key5
 

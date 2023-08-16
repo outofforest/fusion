@@ -96,11 +96,8 @@ func (s *revisionDiffStore[TKey, TValue, THash]) RunEvents(ctx context.Context) 
 
 								sentEvents[eventCh] = struct{}{}
 							}
-							delete(eventChs, eventCh)
-							if len(eventChs) == 0 {
-								delete(events, hash)
-							}
 						}
+						delete(events, hash)
 					}
 				}
 			}
