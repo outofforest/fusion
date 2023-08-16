@@ -25,19 +25,15 @@ type readRevision[THash comparable] struct {
 	Hash      THash
 }
 
-var (
-	errInconsistentRead     = errors.New("inconsistent read detected")
-	errAwaitingPreviousTask = errors.New("await previous task")
-)
+var errInconsistentRead = errors.New("inconsistent read detected")
 
 type revisionDiffStore[TKey, TValue any, THash comparable] struct {
 	parentStore Store[TKey, TValue]
 	hashingFunc HashingFunc[TKey, THash]
 
-	mu        sync.RWMutex
-	taskIndex uint64
-	cache     map[THash]revisionDiff[TKey, TValue]
-	diffList  *list[THash]
+	mu       sync.RWMutex
+	cache    map[THash]revisionDiff[TKey, TValue]
+	diffList *list[THash]
 }
 
 func newRevisionDiffStore[TKey, TValue any, THash comparable](
@@ -53,44 +49,37 @@ func newRevisionDiffStore[TKey, TValue any, THash comparable](
 }
 
 func (s *revisionDiffStore[TKey, TValue, THash]) Get(key TKey) (uint64, TValue, bool) {
-	s.mu.RLock()
 	hash := s.hashingFunc(key)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	if diff, exists := s.cache[hash]; exists {
-		defer s.mu.RUnlock()
 		return diff.TaskIndex, diff.Value, diff.Exists
 	}
-	s.mu.RUnlock()
 
 	value, exists := s.parentStore.Get(key)
 	return 0, value, exists
 }
 
-func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(err error, store *taskDiffStore[TKey, TValue, THash]) error {
-	s.mu.RLock()
+func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(
+	err error,
+	store *taskDiffStore[TKey, TValue, THash],
+) error {
 	for item := store.readList.Head; item != nil; item = item.Next {
 		for _, r := range item.Slice {
 			if diff := s.cache[r.Hash]; diff.TaskIndex > r.TaskIndex {
-				s.mu.RUnlock()
 				return errInconsistentRead
 			}
 		}
 	}
 
-	if s.taskIndex != store.taskIndex-1 {
-		s.mu.RUnlock()
-		return errAwaitingPreviousTask
-	}
-
-	s.mu.RUnlock()
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.taskIndex = store.taskIndex
-
 	if err != nil {
 		return nil //nolint:nilerr
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	for item := store.diffList.Head; item != nil; item = item.Next {
 		for _, hash := range item.Slice {
