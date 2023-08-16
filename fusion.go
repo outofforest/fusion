@@ -8,7 +8,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-const nWorkers = 50
+const nWorkers = 5
 
 type task[TKey, TValue any, THash comparable] struct {
 	TaskIndex   uint64
@@ -141,12 +141,10 @@ mainLoop:
 				availableWorkerCh <- struct{}{}
 				return errors.WithStack(ctx.Err())
 			case <-task.RedoCh:
-				revisionStore.cleanEvents(taskStore)
 				continue
 			case <-task.MergeCh:
 				select {
 				case <-task.RedoCh:
-					revisionStore.cleanEvents(taskStore)
 					continue
 				default:
 				}

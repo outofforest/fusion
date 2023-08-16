@@ -54,64 +54,43 @@ type eventMerged[THash comparable] struct {
 	NextCh   chan<- struct{}
 }
 
-type eventClean[THash comparable] struct {
-	ReadList *list[THash]
-	Ch       chan<- struct{}
-}
-
 func (s *revisionDiffStore[TKey, TValue, THash]) RunEvents(ctx context.Context) error {
-	events := map[THash]map[chan<- struct{}]struct{}{}
+	events := map[THash]*list[chan<- struct{}]{}
 
 	for event := range s.eventCh {
 		switch e := event.(type) {
 		case eventRead[THash]:
-			if chs, exists := events[e.Hash]; exists {
-				chs[e.Ch] = struct{}{}
-			} else {
-				events[e.Hash] = map[chan<- struct{}]struct{}{
-					e.Ch: {},
-				}
+			chs := events[e.Hash]
+			if chs == nil {
+				chs = newList[chan<- struct{}]()
+				events[e.Hash] = chs
 			}
+			chs.Append(e.Ch)
 		case eventMerged[THash]:
-			for item := e.ReadList.Head; item != nil; item = item.Next {
-				for _, hash := range item.Slice {
-					delete(events[hash], e.Ch)
-					if len(events[hash]) == 0 {
-						delete(events, hash)
-					}
-				}
-			}
-
 			if e.Error == nil {
 				sentEvents := map[chan<- struct{}]struct{}{}
 				for item := e.DiffList.Head; item != nil; item = item.Next {
 					for _, hash := range item.Slice {
-						eventChs := events[hash]
-						for eventCh := range eventChs {
-							if _, exists := sentEvents[eventCh]; !exists {
-								select {
-								case eventCh <- struct{}{}:
-								default:
-								}
+						if l := events[hash]; l != nil {
+							for chs := l.Head; chs != nil; chs = chs.Next {
+								for _, ch := range chs.Slice {
+									if _, exists := sentEvents[ch]; !exists {
+										select {
+										case ch <- struct{}{}:
+										default:
+										}
 
-								sentEvents[eventCh] = struct{}{}
+										sentEvents[ch] = struct{}{}
+									}
+								}
 							}
+							l.Reset()
 						}
-						delete(events, hash)
 					}
 				}
 			}
 
 			close(e.NextCh)
-		case eventClean[THash]:
-			for item := e.ReadList.Head; item != nil; item = item.Next {
-				for _, hash := range item.Slice {
-					delete(events[hash], e.Ch)
-					if len(events[hash]) == 0 {
-						delete(events, hash)
-					}
-				}
-			}
 		}
 	}
 
@@ -164,13 +143,6 @@ func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(errHandler error,
 		Ch:       store.eventCh,
 		Error:    errHandler,
 		NextCh:   nextCh,
-	}
-}
-
-func (s *revisionDiffStore[TKey, TValue, THash]) cleanEvents(store *taskDiffStore[TKey, TValue, THash]) {
-	s.eventCh <- eventClean[THash]{
-		ReadList: store.readList,
-		Ch:       store.eventCh,
 	}
 }
 

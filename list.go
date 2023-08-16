@@ -1,6 +1,6 @@
 package fusion
 
-const degree = 32
+const degree = 64
 
 type listItem[T any] struct {
 	Slice []T
@@ -32,4 +32,10 @@ func (l *list[T]) Append(v T) {
 		l.tail.Next = newListItem[T]()
 		l.tail = l.tail.Next
 	}
+}
+
+func (l *list[T]) Reset() {
+	l.Head.Next = nil
+	l.Head.Slice = l.Head.Slice[:1]
+	l.tail = l.Head
 }
