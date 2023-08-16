@@ -29,7 +29,16 @@ func newList[T any]() *list[T] {
 func (l *list[T]) Append(v T) {
 	l.tail.Slice = append(l.tail.Slice, v)
 	if len(l.tail.Slice) == degree {
-		l.tail.Next = newListItem[T]()
+		if l.tail.Next == nil {
+			l.tail.Next = newListItem[T]()
+		} else {
+			l.tail.Next.Slice = l.tail.Next.Slice[:1]
+		}
 		l.tail = l.tail.Next
 	}
+}
+
+func (l *list[T]) Reset() {
+	l.Head.Slice = l.Head.Slice[:1]
+	l.tail = l.Head
 }

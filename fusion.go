@@ -135,6 +135,7 @@ mainLoop:
 			err := revisionStore.mergeTaskDiff(errHandler, taskStore)
 			switch err {
 			case errInconsistentRead:
+				taskStore.Reset()
 				continue
 			default:
 				resultCh <- errHandler
