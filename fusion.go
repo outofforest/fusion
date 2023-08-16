@@ -115,14 +115,15 @@ mainLoop:
 			return err
 		}
 
+		taskStore := newTaskDiffStore[TKey, TValue, THash](
+			task.TaskIndex,
+			revisionStore,
+			hashingFunc,
+			diffList,
+			readList,
+		)
+
 		for {
-			taskStore := newTaskDiffStore[TKey, TValue, THash](
-				task.TaskIndex,
-				revisionStore,
-				hashingFunc,
-				diffList,
-				readList,
-			)
 			var errHandler error
 			func() {
 				defer func() {
