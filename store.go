@@ -127,14 +127,19 @@ func newTaskDiffStore[TKey, TValue any, THash comparable](
 	taskIndex uint64,
 	parentStore *revisionDiffStore[TKey, TValue, THash],
 	hashingFunc HashingFunc[TKey, THash],
+	diffList *list[THash],
+	readList *list[readRevision[THash]],
 ) *taskDiffStore[TKey, TValue, THash] {
+	diffList.Reset()
+	readList.Reset()
+
 	return &taskDiffStore[TKey, TValue, THash]{
 		taskIndex:   taskIndex,
 		parentStore: parentStore,
 		hashingFunc: hashingFunc,
 		cache:       map[THash]taskDiff[TKey, TValue]{},
-		diffList:    newList[THash](),
-		readList:    newList[readRevision[THash]](),
+		diffList:    diffList,
+		readList:    readList,
 	}
 }
 
