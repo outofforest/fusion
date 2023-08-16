@@ -19,6 +19,8 @@ type task[TKey, TValue any, THash comparable] struct {
 }
 
 type state[TKey, TValue any, THash comparable] struct {
+	results []error
+
 	mu              sync.Mutex
 	taskIndex       uint64
 	handlerCh       <-chan HandlerFunc[TKey, TValue]
@@ -27,11 +29,13 @@ type state[TKey, TValue any, THash comparable] struct {
 }
 
 func newState[TKey, TValue any, THash comparable](
+	nHandlers int,
 	handlerCh <-chan HandlerFunc[TKey, TValue],
 ) *state[TKey, TValue, THash] {
 	prevTaskReadyCh := make(chan struct{})
 	close(prevTaskReadyCh)
 	return &state[TKey, TValue, THash]{
+		results:         make([]error, 0, nHandlers),
 		handlerCh:       handlerCh,
 		prevTaskReadyCh: prevTaskReadyCh,
 		mergeNextTaskCh: make(chan struct{}, 1),
@@ -70,38 +74,35 @@ func Run[TKey, TValue any, THash comparable](
 	ctx context.Context,
 	store Store[TKey, TValue],
 	hashingFunc HashingFunc[TKey, THash],
+	nHandlers int,
 	handlerCh <-chan HandlerFunc[TKey, TValue],
-	resultCh chan<- error,
-) error {
-	defer close(resultCh)
-
+) ([]error, error) {
 	revisionStore := newRevisionDiffStore[TKey, TValue, THash](store, hashingFunc)
+	state := newState[TKey, TValue, THash](nHandlers, handlerCh)
 
 	err := parallel.Run(ctx, func(ctx context.Context, spawn parallel.SpawnFn) error {
-		state := newState[TKey, TValue, THash](handlerCh)
 		for i := 0; i < nWorkers; i++ {
 			spawn(fmt.Sprintf("worker-%d", i), parallel.Continue, func(ctx context.Context) error {
-				return worker[TKey, TValue, THash](ctx, hashingFunc, state, resultCh, revisionStore)
+				return worker[TKey, TValue, THash](ctx, hashingFunc, state, revisionStore)
 			})
 		}
 
 		return nil
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	revisionStore.applyTo(store)
 
 	// returning ctx.Err() is important to not save inconsistent results in case execution has been canceled
-	return errors.WithStack(ctx.Err())
+	return state.results, errors.WithStack(ctx.Err())
 }
 
 func worker[TKey, TValue any, THash comparable](
 	ctx context.Context,
 	hashingFunc HashingFunc[TKey, THash],
 	state *state[TKey, TValue, THash],
-	resultCh chan<- error,
 	revisionStore *revisionDiffStore[TKey, TValue, THash],
 ) error {
 mainLoop:
@@ -135,7 +136,7 @@ mainLoop:
 				taskStore.Reset()
 				continue
 			default:
-				resultCh <- errHandler
+				state.results = append(state.results, errHandler)
 				close(task.MergeNextTaskCh)
 				continue mainLoop
 			}

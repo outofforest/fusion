@@ -604,26 +604,13 @@ func do(
 	managerFunc func(),
 	handlerCh <-chan HandlerFunc[string, uint64],
 ) []error {
-	results := make([]error, 0, cap(handlerCh))
+	var results []error
 
 	requireT.NoError(parallel.Run(ctx, func(ctx context.Context, spawn parallel.SpawnFn) error {
-		resultCh := make(chan error)
-
 		spawn("fusion", parallel.Continue, func(ctx context.Context) error {
-			return Run[string, uint64, string](ctx, s, hashingFunc, handlerCh, resultCh)
-		})
-		spawn("results", parallel.Continue, func(ctx context.Context) error {
-			for {
-				select {
-				case <-ctx.Done():
-					return errors.WithStack(ctx.Err())
-				case err := <-resultCh:
-					results = append(results, err)
-					if len(results) == cap(results) {
-						return nil
-					}
-				}
-			}
+			var err error
+			results, err = Run[string, uint64, string](ctx, s, hashingFunc, len(handlerCh), handlerCh)
+			return err
 		})
 		if managerFunc != nil {
 			spawn("manager", parallel.Continue, func(ctx context.Context) error {
