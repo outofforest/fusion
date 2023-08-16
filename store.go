@@ -66,10 +66,12 @@ func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(
 	err error,
 	store *taskDiffStore[TKey, TValue, THash],
 ) error {
-	for item := store.readList.Head; item != nil; item = item.Next {
-		for _, r := range item.Slice {
-			if diff := s.cache[r.Hash]; diff.TaskIndex > r.TaskIndex {
-				return errInconsistentRead
+	if store.readList != nil {
+		for item := store.readList.Head; item != nil; item = item.Next {
+			for _, r := range item.Slice {
+				if diff := s.cache[r.Hash]; diff.TaskIndex > r.TaskIndex {
+					return errInconsistentRead
+				}
 			}
 		}
 	}
@@ -143,16 +145,25 @@ func (s *taskDiffStore[TKey, TValue, THash]) Get(key TKey) (TValue, bool) {
 	}
 
 	taskIndex, value, exists := s.parentStore.Get(key)
-	s.readList.Append(readRevision[THash]{
-		TaskIndex: taskIndex,
-		Hash:      hash,
-	})
+
+	if s.readList != nil {
+		s.readList.Append(readRevision[THash]{
+			TaskIndex: taskIndex,
+			Hash:      hash,
+		})
+	}
 	s.cache[hash] = taskDiff[TKey, TValue]{
 		Key:    key,
 		Value:  value,
 		Exists: exists,
 	}
 	return value, exists
+}
+
+func (s *taskDiffStore[TKey, TValue, THash]) Reset() {
+	s.cache = map[THash]taskDiff[TKey, TValue]{}
+	s.readList = nil
+	s.diffList.Reset()
 }
 
 func (s *taskDiffStore[TKey, TValue, THash]) Set(key TKey, value TValue) {
