@@ -8,7 +8,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-const nWorkers = 10
+const nWorkers = 50
 
 type task[TKey, TValue any, THash comparable] struct {
 	TaskIndex   uint64
@@ -38,8 +38,9 @@ func Run[TKey, TValue any, THash comparable](
 		taskCh := make(chan task[TKey, TValue, THash], nWorkers)
 
 		spawn("taskDistributor", parallel.Exit, func(ctx context.Context) error {
-			return taskDistributor[TKey, TValue, THash](ctx, handlerCh, taskCh, availableWorkerCh)
+			return taskDistributor[TKey, TValue, THash](ctx, handlerCh, taskCh, availableWorkerCh, revisionStore.eventCh)
 		})
+		spawn("revisionStore", parallel.Continue, revisionStore.RunEvents)
 		for i := 0; i < nWorkers; i++ {
 			spawn(fmt.Sprintf("worker-%d", i), parallel.Continue, func(ctx context.Context) error {
 				return worker[TKey, TValue, THash](ctx, hashingFunc, taskCh, resultCh, availableWorkerCh, revisionStore)
@@ -63,6 +64,7 @@ func taskDistributor[TKey, TValue any, THash comparable](
 	handlerCh <-chan HandlerFunc[TKey, TValue],
 	taskCh chan<- task[TKey, TValue, THash],
 	availableWorkerCh chan struct{},
+	eventCh chan<- any,
 ) error {
 	defer func() {
 		close(taskCh)
@@ -71,6 +73,8 @@ func taskDistributor[TKey, TValue any, THash comparable](
 		for i := 0; i < nWorkers-1; i++ {
 			<-availableWorkerCh
 		}
+
+		close(eventCh)
 	}()
 
 	var handlerFunc HandlerFunc[TKey, TValue]
@@ -149,10 +153,12 @@ mainLoop:
 
 				if errHandler == nil {
 					revisionStore.mergeTaskDiff(taskStore)
+				} else {
+					revisionStore.cleanEvents(taskStore)
 				}
+				revisionStore.mergeNext(task.NextMergeCh)
 
 				resultCh <- errHandler
-				close(task.NextMergeCh)
 				availableWorkerCh <- struct{}{}
 
 				continue mainLoop

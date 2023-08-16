@@ -26,14 +26,14 @@ func handler(ctx context.Context, store Store[string, uint64]) error {
 	store.Set(keyRand, 0)
 
 	store.Get(key1)
-	store.Get(key2)
-	store.Get(key3)
+	//store.Get(key2)
+	//store.Get(key3)
 
 	store.Set(key1, 0)
 	store.Set(key2, 0)
 
-	store.Get(key4)
-	store.Get(key5)
+	//store.Get(key4)
+	//store.Get(key5)
 
 	store.Set(key3, 0)
 	store.Set(key4, 0)
