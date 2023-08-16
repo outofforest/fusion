@@ -14,7 +14,7 @@ type task[TKey, TValue any, THash comparable] struct {
 	TaskIndex       uint64
 	HandlerFunc     HandlerFunc[TKey, TValue]
 	PrevTaskReadyCh <-chan struct{}
-	TaskReadyCh     chan<- struct{}
+	MergeNextTaskCh chan<- struct{}
 }
 
 // Run executes handlers.
@@ -77,7 +77,7 @@ func taskDistributor[TKey, TValue any, THash comparable](
 
 	prevTaskReadyCh := make(chan struct{})
 	close(prevTaskReadyCh)
-	taskReadyCh := make(chan struct{}, 1)
+	mergeNextTaskCh := make(chan struct{}, 1)
 
 	// 1 is here because 0 means that value was read from persistent store
 	for taskIndex := uint64(1); ; taskIndex++ {
@@ -96,11 +96,11 @@ func taskDistributor[TKey, TValue any, THash comparable](
 			TaskIndex:       taskIndex,
 			HandlerFunc:     handlerFunc,
 			PrevTaskReadyCh: prevTaskReadyCh,
-			TaskReadyCh:     taskReadyCh,
+			MergeNextTaskCh: mergeNextTaskCh,
 		}
 
-		prevTaskReadyCh = taskReadyCh
-		taskReadyCh = make(chan struct{}, 1)
+		prevTaskReadyCh = mergeNextTaskCh
+		mergeNextTaskCh = make(chan struct{}, 1)
 	}
 }
 
@@ -112,9 +112,8 @@ func worker[TKey, TValue any, THash comparable](
 	availableWorkerCh chan<- struct{},
 	revisionStore *revisionDiffStore[TKey, TValue, THash],
 ) error {
-loop:
+mainLoop:
 	for task := range taskCh {
-	taskLoop:
 		for {
 			taskStore := newTaskDiffStore[TKey, TValue, THash](task.TaskIndex, revisionStore, hashingFunc)
 			var errHandler error
@@ -131,28 +130,17 @@ loop:
 				errHandler = task.HandlerFunc(ctx, taskStore)
 			}()
 
-			for {
-				err := revisionStore.mergeTaskDiff(errHandler, taskStore)
-				switch err {
-				case errAwaitingPreviousTask:
-					<-task.PrevTaskReadyCh
+			<-task.PrevTaskReadyCh
 
-					select {
-					case task.TaskReadyCh <- struct{}{}:
-					default:
-					}
-				case errInconsistentRead:
-					continue taskLoop
-				default:
-					select {
-					case task.TaskReadyCh <- struct{}{}:
-					default:
-					}
-
-					resultCh <- errHandler
-					availableWorkerCh <- struct{}{}
-					continue loop
-				}
+			err := revisionStore.mergeTaskDiff(errHandler, taskStore)
+			switch err {
+			case errInconsistentRead:
+				continue
+			default:
+				resultCh <- errHandler
+				availableWorkerCh <- struct{}{}
+				close(task.MergeNextTaskCh)
+				continue mainLoop
 			}
 		}
 	}
