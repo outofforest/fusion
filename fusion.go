@@ -105,6 +105,9 @@ func worker[TKey, TValue any, THash comparable](
 	state *state[TKey, TValue, THash],
 	revisionStore *revisionDiffStore[TKey, TValue, THash],
 ) error {
+	diffList := newList[THash]()
+	readList := newList[readRevision[THash]]()
+
 mainLoop:
 	for {
 		task, ok, err := state.Next(ctx)
@@ -113,7 +116,13 @@ mainLoop:
 		}
 
 		for {
-			taskStore := newTaskDiffStore[TKey, TValue, THash](task.TaskIndex, revisionStore, hashingFunc)
+			taskStore := newTaskDiffStore[TKey, TValue, THash](
+				task.TaskIndex,
+				revisionStore,
+				hashingFunc,
+				diffList,
+				readList,
+			)
 			var errHandler error
 			func() {
 				defer func() {

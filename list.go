@@ -5,6 +5,7 @@ const degree = 32
 type listItem[T any] struct {
 	Slice []T
 	Next  *listItem[T]
+	next  *listItem[T]
 }
 
 func newListItem[T any]() *listItem[T] {
@@ -29,16 +30,19 @@ func newList[T any]() *list[T] {
 func (l *list[T]) Append(v T) {
 	l.tail.Slice = append(l.tail.Slice, v)
 	if len(l.tail.Slice) == degree {
-		if l.tail.Next == nil {
-			l.tail.Next = newListItem[T]()
+		if l.tail.next == nil {
+			l.tail.next = newListItem[T]()
 		} else {
-			l.tail.Next.Slice = l.tail.Next.Slice[:1]
+			l.tail.next.Slice = l.tail.next.Slice[:0]
+			l.tail.next.Next = nil
 		}
-		l.tail = l.tail.Next
+		l.tail.Next = l.tail.next
+		l.tail = l.tail.next
 	}
 }
 
 func (l *list[T]) Reset() {
-	l.Head.Slice = l.Head.Slice[:1]
+	l.Head.Slice = l.Head.Slice[:0]
+	l.Head.Next = nil
 	l.tail = l.Head
 }
