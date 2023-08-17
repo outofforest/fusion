@@ -57,8 +57,8 @@ func closedChan() chan struct{} {
 	return ch
 }
 
-func toHandlerCh(handlers ...HandlerFunc[string, uint64]) <-chan HandlerFunc[string, uint64] {
-	handlerCh := make(chan HandlerFunc[string, uint64], len(handlers))
+func toHandlerCh(handlers ...HandlerFunc[string, uint64, string]) <-chan HandlerFunc[string, uint64, string] {
+	handlerCh := make(chan HandlerFunc[string, uint64, string], len(handlers))
 	for _, handler := range handlers {
 		handlerCh <- handler
 	}
@@ -89,12 +89,15 @@ type msgSend struct {
 	Err           error
 }
 
-func sendHandler(msg msgSend) HandlerFunc[string, uint64] {
-	return func(ctx context.Context, store Store[string, uint64]) error {
+func sendHandler(msg msgSend) HandlerFunc[string, uint64, string] {
+	return func(ctx context.Context, store KeySource[string, uint64, string]) error {
+		senderBalanceKey := store.Key(msg.Sender)
+		recipientBalanceKey := store.Key(msg.Recipient)
+
 		<-msg.DoReadingCh
 
-		senderBalance, _ := store.Get(msg.Sender)
-		recipientBalance, _ := store.Get(msg.Recipient)
+		senderBalance, _ := senderBalanceKey.Get()
+		recipientBalance, _ := recipientBalanceKey.Get()
 
 		msg.ReadingDoneCh <- struct{}{}
 
@@ -104,8 +107,8 @@ func sendHandler(msg msgSend) HandlerFunc[string, uint64] {
 
 		<-msg.DoWritingCh
 
-		store.Set(msg.Sender, senderBalance)
-		store.Set(msg.Recipient, recipientBalance)
+		senderBalanceKey.Set(senderBalance)
+		recipientBalanceKey.Set(recipientBalance)
 
 		msg.WritingDoneCh <- struct{}{}
 
@@ -120,9 +123,9 @@ func sendHandler(msg msgSend) HandlerFunc[string, uint64] {
 	}
 }
 
-func deleteHandler(err error) HandlerFunc[string, uint64] {
-	return func(ctx context.Context, store Store[string, uint64]) error {
-		store.Delete(alice)
+func deleteHandler(err error) HandlerFunc[string, uint64, string] {
+	return func(ctx context.Context, store KeySource[string, uint64, string]) error {
+		store.Key(alice).Delete()
 		return err
 	}
 }
@@ -570,7 +573,7 @@ func TestManyTasks(t *testing.T) {
 	s.Set(alice, 100+count*10)
 	s.Set(bob, 50)
 
-	handlers := make([]HandlerFunc[string, uint64], 0, count)
+	handlers := make([]HandlerFunc[string, uint64, string], 0, count)
 	expectedResults := make([]error, count)
 	for i := 0; i < count; i++ {
 		handlers = append(handlers, sendHandler(msgSend{
@@ -602,7 +605,7 @@ func do(
 	requireT *require.Assertions,
 	s Store[string, uint64],
 	managerFunc func(),
-	handlerCh <-chan HandlerFunc[string, uint64],
+	handlerCh <-chan HandlerFunc[string, uint64, string],
 ) []error {
 	var results []error
 

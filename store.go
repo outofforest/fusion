@@ -143,8 +143,11 @@ func newTaskDiffStore[TKey, TValue any, THash comparable](
 	}
 }
 
-func (s *taskDiffStore[TKey, TValue, THash]) Get(key TKey) (TValue, bool) {
-	hash := s.hashingFunc(key)
+func (s *taskDiffStore[TKey, TValue, THash]) Key(key TKey) KeyStore[TKey, TValue, THash] {
+	return newKeyStore[TKey, TValue, THash](s, key, s.hashingFunc(key))
+}
+
+func (s *taskDiffStore[TKey, TValue, THash]) get(key TKey, hash THash) (TValue, bool) {
 	if diff, exists := s.cache[hash]; exists {
 		return diff.Value, diff.Exists
 	}
@@ -165,14 +168,7 @@ func (s *taskDiffStore[TKey, TValue, THash]) Get(key TKey) (TValue, bool) {
 	return value, exists
 }
 
-func (s *taskDiffStore[TKey, TValue, THash]) Reset() {
-	s.cache = map[THash]taskDiff[TKey, TValue]{}
-	s.readList = nil
-	s.diffList.Reset()
-}
-
-func (s *taskDiffStore[TKey, TValue, THash]) Set(key TKey, value TValue) {
-	hash := s.hashingFunc(key)
+func (s *taskDiffStore[TKey, TValue, THash]) set(key TKey, hash THash, value TValue) {
 	diff, exists := s.cache[hash]
 	if exists {
 		diff.Value = value
@@ -191,8 +187,7 @@ func (s *taskDiffStore[TKey, TValue, THash]) Set(key TKey, value TValue) {
 	s.cache[hash] = diff
 }
 
-func (s *taskDiffStore[TKey, TValue, THash]) Delete(key TKey) {
-	hash := s.hashingFunc(key)
+func (s *taskDiffStore[TKey, TValue, THash]) delete(key TKey, hash THash) {
 	diff, exists := s.cache[hash]
 	if exists {
 		var v TValue
@@ -208,4 +203,44 @@ func (s *taskDiffStore[TKey, TValue, THash]) Delete(key TKey) {
 		s.diffList.Append(hash)
 	}
 	s.cache[hash] = diff
+}
+
+func (s *taskDiffStore[TKey, TValue, THash]) Reset() {
+	s.cache = map[THash]taskDiff[TKey, TValue]{}
+	s.readList = nil
+	s.diffList.Reset()
+}
+
+// KeyStore is the store responsible for getting and storing value of single key.
+type KeyStore[TKey, TValue any, THash comparable] struct {
+	store *taskDiffStore[TKey, TValue, THash]
+	key   TKey
+	hash  THash
+}
+
+func newKeyStore[TKey, TValue any, THash comparable](
+	store *taskDiffStore[TKey, TValue, THash],
+	key TKey,
+	hash THash,
+) KeyStore[TKey, TValue, THash] {
+	return KeyStore[TKey, TValue, THash]{
+		store: store,
+		key:   key,
+		hash:  hash,
+	}
+}
+
+// Get returns the value.
+func (ks KeyStore[TKey, TValue, THash]) Get() (TValue, bool) {
+	return ks.store.get(ks.key, ks.hash)
+}
+
+// Set sets the value.
+func (ks KeyStore[TKey, TValue, THash]) Set(value TValue) {
+	ks.store.set(ks.key, ks.hash, value)
+}
+
+// Delete deletes the key.
+func (ks KeyStore[TKey, TValue, THash]) Delete() {
+	ks.store.delete(ks.key, ks.hash)
 }
