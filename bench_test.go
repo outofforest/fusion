@@ -1,7 +1,6 @@
 package fusion
 
 import (
-	"context"
 	"math/rand"
 	"testing"
 
@@ -14,13 +13,12 @@ var keys = []string{
 	"zulu",
 }
 
-func handler(ctx context.Context, kf KeyFactory[string, uint64, string]) error {
+func handler(kf KeyFactory[string, uint64, string]) error {
 	key1 := kf.Key(keys[rand.Intn(len(keys))])
 	key2 := kf.Key(keys[rand.Intn(len(keys))])
 	key3 := kf.Key(keys[rand.Intn(len(keys))])
 	key4 := kf.Key(keys[rand.Intn(len(keys))])
 	key5 := kf.Key(keys[rand.Intn(len(keys))])
-	kf.Seal()
 
 	key1.Get()
 	key1.Set(0)
@@ -43,7 +41,6 @@ func BenchmarkFusion(b *testing.B) {
 	const count = 10000
 
 	requireT := require.New(b)
-	ctx := newContext(b)
 
 	s := newTestStore()
 
@@ -54,7 +51,7 @@ func BenchmarkFusion(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	results := do(ctx, requireT, s, toHandlerCh(handlers...))
+	results := do(requireT, s, toHandlerCh(handlers...))
 	b.StopTimer()
 
 	requireT.Equal(expectedResults, results)
