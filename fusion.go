@@ -13,7 +13,7 @@ const nWorkers = 5
 
 type task[TKey, TValue any, THash comparable] struct {
 	TaskIndex       uint64
-	HandlerFunc     HandlerFunc[TKey, TValue]
+	HandlerFunc     HandlerFunc[TKey, TValue, THash]
 	PrevTaskReadyCh <-chan struct{}
 	MergeNextTaskCh chan<- struct{}
 }
@@ -23,14 +23,14 @@ type state[TKey, TValue any, THash comparable] struct {
 
 	mu              sync.Mutex
 	taskIndex       uint64
-	handlerCh       <-chan HandlerFunc[TKey, TValue]
+	handlerCh       <-chan HandlerFunc[TKey, TValue, THash]
 	prevTaskReadyCh chan struct{}
 	mergeNextTaskCh chan struct{}
 }
 
 func newState[TKey, TValue any, THash comparable](
 	nHandlers int,
-	handlerCh <-chan HandlerFunc[TKey, TValue],
+	handlerCh <-chan HandlerFunc[TKey, TValue, THash],
 ) *state[TKey, TValue, THash] {
 	prevTaskReadyCh := make(chan struct{})
 	close(prevTaskReadyCh)
@@ -75,7 +75,7 @@ func Run[TKey, TValue any, THash comparable](
 	store Store[TKey, TValue],
 	hashingFunc HashingFunc[TKey, THash],
 	nHandlers int,
-	handlerCh <-chan HandlerFunc[TKey, TValue],
+	handlerCh <-chan HandlerFunc[TKey, TValue, THash],
 ) ([]error, error) {
 	revisionStore := newRevisionDiffStore[TKey, TValue, THash](store, hashingFunc)
 	state := newState[TKey, TValue, THash](nHandlers, handlerCh)
