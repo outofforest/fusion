@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/outofforest/logger"
-	"github.com/outofforest/parallel"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -51,12 +50,6 @@ var (
 	errPanic2 = errors.New("panic2")
 )
 
-func closedChan() chan struct{} {
-	ch := make(chan struct{})
-	close(ch)
-	return ch
-}
-
 func toHandlerCh(handlers ...HandlerFunc[string, uint64, string]) <-chan HandlerFunc[string, uint64, string] {
 	handlerCh := make(chan HandlerFunc[string, uint64, string], len(handlers))
 	for _, handler := range handlers {
@@ -82,35 +75,24 @@ type msgSend struct {
 	Recipient string
 	Amount    uint64
 
-	DoReadingCh   chan struct{}
-	ReadingDoneCh chan struct{}
-	DoWritingCh   chan struct{}
-	WritingDoneCh chan struct{}
-	Err           error
+	Err error
 }
 
 func sendHandler(msg msgSend) HandlerFunc[string, uint64, string] {
-	return func(ctx context.Context, store KeySource[string, uint64, string]) error {
-		senderBalanceKey := store.Key(msg.Sender)
-		recipientBalanceKey := store.Key(msg.Recipient)
-
-		<-msg.DoReadingCh
+	return func(ctx context.Context, kf KeyFactory[string, uint64, string]) error {
+		senderBalanceKey := kf.Key(msg.Sender)
+		recipientBalanceKey := kf.Key(msg.Recipient)
+		kf.Seal()
 
 		senderBalance, _ := senderBalanceKey.Get()
 		recipientBalance, _ := recipientBalanceKey.Get()
-
-		msg.ReadingDoneCh <- struct{}{}
 
 		// I don't care about int overflows here
 		senderBalance -= msg.Amount
 		recipientBalance += msg.Amount
 
-		<-msg.DoWritingCh
-
 		senderBalanceKey.Set(senderBalance)
 		recipientBalanceKey.Set(recipientBalance)
-
-		msg.WritingDoneCh <- struct{}{}
 
 		if errors.Is(msg.Err, errPanic) {
 			panic(msg.Err)
@@ -124,8 +106,12 @@ func sendHandler(msg msgSend) HandlerFunc[string, uint64, string] {
 }
 
 func deleteHandler(err error) HandlerFunc[string, uint64, string] {
-	return func(ctx context.Context, store KeySource[string, uint64, string]) error {
-		store.Key(alice).Delete()
+	return func(ctx context.Context, kf KeyFactory[string, uint64, string]) error {
+		aliceKey := kf.Key(alice)
+		kf.Seal()
+
+		aliceKey.Delete()
+
 		return err
 	}
 }
@@ -138,17 +124,13 @@ func TestSingleTask(t *testing.T) {
 	s.Set(alice, 100)
 	s.Set(bob, 50)
 
-	results := do(ctx, requireT, s, nil,
+	results := do(ctx, requireT, s,
 		toHandlerCh(
 			sendHandler(msgSend{
-				Sender:        alice,
-				Recipient:     bob,
-				Amount:        10,
-				DoReadingCh:   closedChan(),
-				ReadingDoneCh: make(chan struct{}, 1),
-				DoWritingCh:   closedChan(),
-				WritingDoneCh: make(chan struct{}, 1),
-				Err:           nil,
+				Sender:    alice,
+				Recipient: bob,
+				Amount:    10,
+				Err:       nil,
 			}),
 		),
 	)
@@ -174,17 +156,13 @@ func TestSingleTaskError(t *testing.T) {
 
 	errTest := errors.New("test error")
 
-	results := do(ctx, requireT, s, nil,
+	results := do(ctx, requireT, s,
 		toHandlerCh(
 			sendHandler(msgSend{
-				Sender:        alice,
-				Recipient:     bob,
-				Amount:        10,
-				DoReadingCh:   closedChan(),
-				ReadingDoneCh: make(chan struct{}, 1),
-				DoWritingCh:   closedChan(),
-				WritingDoneCh: make(chan struct{}, 1),
-				Err:           errTest,
+				Sender:    alice,
+				Recipient: bob,
+				Amount:    10,
+				Err:       errTest,
 			}),
 		),
 	)
@@ -208,17 +186,13 @@ func TestSingleTaskPanic(t *testing.T) {
 	s.Set(alice, 100)
 	s.Set(bob, 50)
 
-	results := do(ctx, requireT, s, nil,
+	results := do(ctx, requireT, s,
 		toHandlerCh(
 			sendHandler(msgSend{
-				Sender:        alice,
-				Recipient:     bob,
-				Amount:        10,
-				DoReadingCh:   closedChan(),
-				ReadingDoneCh: make(chan struct{}, 1),
-				DoWritingCh:   closedChan(),
-				WritingDoneCh: make(chan struct{}, 1),
-				Err:           errPanic,
+				Sender:    alice,
+				Recipient: bob,
+				Amount:    10,
+				Err:       errPanic,
 			}),
 		),
 	)
@@ -242,17 +216,13 @@ func TestSingleTaskPanic2(t *testing.T) {
 	s.Set(alice, 100)
 	s.Set(bob, 50)
 
-	results := do(ctx, requireT, s, nil,
+	results := do(ctx, requireT, s,
 		toHandlerCh(
 			sendHandler(msgSend{
-				Sender:        alice,
-				Recipient:     bob,
-				Amount:        10,
-				DoReadingCh:   closedChan(),
-				ReadingDoneCh: make(chan struct{}, 1),
-				DoWritingCh:   closedChan(),
-				WritingDoneCh: make(chan struct{}, 1),
-				Err:           errPanic2,
+				Sender:    alice,
+				Recipient: bob,
+				Amount:    10,
+				Err:       errPanic2,
 			}),
 		),
 	)
@@ -269,225 +239,7 @@ func TestSingleTaskPanic2(t *testing.T) {
 	requireT.Equal(50, int(bobBalance))
 }
 
-func TestTwoTasksWithoutRepeating(t *testing.T) {
-	requireT := require.New(t)
-	ctx := newContext(t)
-
-	s := newTestStore()
-	s.Set(alice, 100)
-	s.Set(bob, 50)
-
-	msg1 := msgSend{
-		Sender:        alice,
-		Recipient:     bob,
-		Amount:        10,
-		DoReadingCh:   closedChan(),
-		ReadingDoneCh: make(chan struct{}, 1),
-		DoWritingCh:   closedChan(),
-		WritingDoneCh: make(chan struct{}, 1),
-	}
-	msg2 := msgSend{
-		Sender:        alice,
-		Recipient:     bob,
-		Amount:        10,
-		DoReadingCh:   make(chan struct{}, 1),
-		ReadingDoneCh: make(chan struct{}, 1),
-		DoWritingCh:   make(chan struct{}, 1),
-		WritingDoneCh: make(chan struct{}, 1),
-	}
-
-	results := do(ctx, requireT, s,
-		func() {
-			<-msg1.WritingDoneCh
-			msg2.DoReadingCh <- struct{}{}
-			msg2.DoWritingCh <- struct{}{}
-		},
-		toHandlerCh(
-			sendHandler(msg1),
-			sendHandler(msg2),
-		),
-	)
-
-	requireT.Equal([]error{nil, nil}, results)
-
-	aliceBalance, exists := s.Get(alice)
-	requireT.True(exists)
-	bobBalance, exists := s.Get(bob)
-	requireT.True(exists)
-
-	requireT.Equal(80, int(aliceBalance))
-	requireT.Equal(70, int(bobBalance))
-}
-
-func TestTwoTasksWithRepeating(t *testing.T) {
-	requireT := require.New(t)
-	ctx := newContext(t)
-
-	s := newTestStore()
-	s.Set(alice, 100)
-	s.Set(bob, 50)
-
-	msg1 := msgSend{
-		Sender:        alice,
-		Recipient:     bob,
-		Amount:        10,
-		DoReadingCh:   closedChan(),
-		ReadingDoneCh: make(chan struct{}, 1),
-		DoWritingCh:   make(chan struct{}, 1),
-		WritingDoneCh: make(chan struct{}, 1),
-	}
-	msg2 := msgSend{
-		Sender:        alice,
-		Recipient:     bob,
-		Amount:        10,
-		DoReadingCh:   closedChan(),
-		ReadingDoneCh: make(chan struct{}, 1),
-		DoWritingCh:   make(chan struct{}, 1),
-		WritingDoneCh: make(chan struct{}, 1),
-	}
-
-	results := do(ctx, requireT, s,
-		func() {
-			<-msg1.ReadingDoneCh
-			<-msg2.ReadingDoneCh
-			msg2.DoWritingCh <- struct{}{}
-			<-msg2.WritingDoneCh
-			msg1.DoWritingCh <- struct{}{}
-			<-msg1.WritingDoneCh
-			<-msg2.ReadingDoneCh
-			msg2.DoWritingCh <- struct{}{}
-			<-msg2.WritingDoneCh
-		},
-		toHandlerCh(
-			sendHandler(msg1),
-			sendHandler(msg2),
-		),
-	)
-
-	requireT.Equal([]error{nil, nil}, results)
-
-	aliceBalance, exists := s.Get(alice)
-	requireT.True(exists)
-	bobBalance, exists := s.Get(bob)
-	requireT.True(exists)
-
-	requireT.Equal(80, int(aliceBalance))
-	requireT.Equal(70, int(bobBalance))
-}
-
-func TestTwoTasksFirstWithError(t *testing.T) {
-	requireT := require.New(t)
-	ctx := newContext(t)
-
-	s := newTestStore()
-	s.Set(alice, 100)
-	s.Set(bob, 50)
-
-	errTest := errors.New("test err")
-
-	msg1 := msgSend{
-		Sender:        alice,
-		Recipient:     bob,
-		Amount:        5,
-		DoReadingCh:   closedChan(),
-		ReadingDoneCh: make(chan struct{}, 1),
-		DoWritingCh:   closedChan(),
-		WritingDoneCh: make(chan struct{}, 1),
-		Err:           errTest,
-	}
-	msg2 := msgSend{
-		Sender:        alice,
-		Recipient:     bob,
-		Amount:        10,
-		DoReadingCh:   make(chan struct{}, 1),
-		ReadingDoneCh: make(chan struct{}, 1),
-		DoWritingCh:   make(chan struct{}, 1),
-		WritingDoneCh: make(chan struct{}, 1),
-	}
-
-	results := do(ctx, requireT, s,
-		func() {
-			<-msg1.WritingDoneCh
-			msg2.DoReadingCh <- struct{}{}
-			msg2.DoWritingCh <- struct{}{}
-		},
-		toHandlerCh(
-			sendHandler(msg1),
-			sendHandler(msg2),
-		),
-	)
-
-	requireT.Equal([]error{errTest, nil}, results)
-
-	aliceBalance, exists := s.Get(alice)
-	requireT.True(exists)
-	bobBalance, exists := s.Get(bob)
-	requireT.True(exists)
-
-	requireT.Equal(90, int(aliceBalance))
-	requireT.Equal(60, int(bobBalance))
-}
-
-func TestTwoTasksSecondWithError(t *testing.T) {
-	requireT := require.New(t)
-	ctx := newContext(t)
-
-	s := newTestStore()
-	s.Set(alice, 100)
-	s.Set(bob, 50)
-
-	errTest := errors.New("test err")
-
-	msg1 := msgSend{
-		Sender:        alice,
-		Recipient:     bob,
-		Amount:        5,
-		DoReadingCh:   closedChan(),
-		ReadingDoneCh: make(chan struct{}, 1),
-		DoWritingCh:   make(chan struct{}, 1),
-		WritingDoneCh: make(chan struct{}, 1),
-	}
-	msg2 := msgSend{
-		Sender:        alice,
-		Recipient:     bob,
-		Amount:        10,
-		DoReadingCh:   closedChan(),
-		ReadingDoneCh: make(chan struct{}, 1),
-		DoWritingCh:   make(chan struct{}, 1),
-		WritingDoneCh: make(chan struct{}, 1),
-		Err:           errTest,
-	}
-
-	results := do(ctx, requireT, s,
-		func() {
-			<-msg1.ReadingDoneCh
-			<-msg2.ReadingDoneCh
-			msg2.DoWritingCh <- struct{}{}
-			<-msg2.WritingDoneCh
-			msg1.DoWritingCh <- struct{}{}
-			<-msg1.WritingDoneCh
-			<-msg2.ReadingDoneCh
-			msg2.DoWritingCh <- struct{}{}
-			<-msg2.WritingDoneCh
-		},
-		toHandlerCh(
-			sendHandler(msg1),
-			sendHandler(msg2),
-		),
-	)
-
-	requireT.Equal([]error{nil, errTest}, results)
-
-	aliceBalance, exists := s.Get(alice)
-	requireT.True(exists)
-	bobBalance, exists := s.Get(bob)
-	requireT.True(exists)
-
-	requireT.Equal(95, int(aliceBalance))
-	requireT.Equal(55, int(bobBalance))
-}
-
-func TestDeleteWithoutError(t *testing.T) {
+func TestSendThenDelete(t *testing.T) {
 	requireT := require.New(t)
 	ctx := newContext(t)
 
@@ -496,17 +248,12 @@ func TestDeleteWithoutError(t *testing.T) {
 	s.Set(bob, 50)
 
 	msg := msgSend{
-		Sender:        alice,
-		Recipient:     bob,
-		Amount:        10,
-		DoReadingCh:   closedChan(),
-		ReadingDoneCh: make(chan struct{}, 1),
-		DoWritingCh:   closedChan(),
-		WritingDoneCh: make(chan struct{}, 1),
+		Sender:    alice,
+		Recipient: bob,
+		Amount:    10,
 	}
 
 	results := do(ctx, requireT, s,
-		nil,
 		toHandlerCh(
 			sendHandler(msg),
 			deleteHandler(nil),
@@ -524,6 +271,38 @@ func TestDeleteWithoutError(t *testing.T) {
 	requireT.Equal(60, int(bobBalance))
 }
 
+func TestDeleteThenSend(t *testing.T) {
+	requireT := require.New(t)
+	ctx := newContext(t)
+
+	s := newTestStore()
+	s.Set(alice, 100)
+	s.Set(bob, 50)
+
+	msg := msgSend{
+		Sender:    bob,
+		Recipient: alice,
+		Amount:    10,
+	}
+
+	results := do(ctx, requireT, s,
+		toHandlerCh(
+			deleteHandler(nil),
+			sendHandler(msg),
+		),
+	)
+
+	requireT.Equal([]error{nil, nil}, results)
+
+	aliceBalance, exists := s.Get(alice)
+	requireT.True(exists)
+	bobBalance, exists := s.Get(bob)
+	requireT.True(exists)
+
+	requireT.Equal(10, int(aliceBalance))
+	requireT.Equal(40, int(bobBalance))
+}
+
 func TestDeleteWithError(t *testing.T) {
 	requireT := require.New(t)
 	ctx := newContext(t)
@@ -535,17 +314,12 @@ func TestDeleteWithError(t *testing.T) {
 	errTest := errors.New("test error")
 
 	msg := msgSend{
-		Sender:        alice,
-		Recipient:     bob,
-		Amount:        10,
-		DoReadingCh:   closedChan(),
-		ReadingDoneCh: make(chan struct{}, 1),
-		DoWritingCh:   closedChan(),
-		WritingDoneCh: make(chan struct{}, 1),
+		Sender:    alice,
+		Recipient: bob,
+		Amount:    10,
 	}
 
 	results := do(ctx, requireT, s,
-		nil,
 		toHandlerCh(
 			sendHandler(msg),
 			deleteHandler(errTest),
@@ -577,17 +351,13 @@ func TestManyTasks(t *testing.T) {
 	expectedResults := make([]error, count)
 	for i := 0; i < count; i++ {
 		handlers = append(handlers, sendHandler(msgSend{
-			Sender:        alice,
-			Recipient:     bob,
-			Amount:        10,
-			DoReadingCh:   closedChan(),
-			ReadingDoneCh: make(chan struct{}, count),
-			DoWritingCh:   closedChan(),
-			WritingDoneCh: make(chan struct{}, count),
+			Sender:    alice,
+			Recipient: bob,
+			Amount:    10,
 		}))
 	}
 
-	results := do(ctx, requireT, s, nil, toHandlerCh(handlers...))
+	results := do(ctx, requireT, s, toHandlerCh(handlers...))
 
 	requireT.Equal(expectedResults, results)
 
@@ -604,26 +374,10 @@ func do(
 	ctx context.Context,
 	requireT *require.Assertions,
 	s Store[string, uint64],
-	managerFunc func(),
 	handlerCh <-chan HandlerFunc[string, uint64, string],
 ) []error {
-	var results []error
-
-	requireT.NoError(parallel.Run(ctx, func(ctx context.Context, spawn parallel.SpawnFn) error {
-		spawn("fusion", parallel.Continue, func(ctx context.Context) error {
-			var err error
-			results, err = Run[string, uint64, string](ctx, s, hashingFunc, len(handlerCh), handlerCh)
-			return err
-		})
-		if managerFunc != nil {
-			spawn("manager", parallel.Continue, func(ctx context.Context) error {
-				managerFunc()
-				return nil
-			})
-		}
-
-		return nil
-	}))
+	results, err := Run[string, uint64, string](ctx, s, hashingFunc, len(handlerCh), handlerCh)
+	requireT.NoError(err)
 
 	return results
 }

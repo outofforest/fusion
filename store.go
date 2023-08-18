@@ -1,39 +1,22 @@
 package fusion
 
-import (
-	"sync"
-
-	"github.com/pkg/errors"
-)
-
 type revisionDiff[TKey, TValue any] struct {
-	TaskIndex uint64
-	Key       TKey
-	Value     TValue
-	Exists    bool
+	Key    TKey
+	Value  TValue
+	Exists bool
 }
 
 type taskDiff[TKey, TValue any] struct {
-	Key     TKey
-	Value   TValue
-	Exists  bool
-	Updated bool
+	Key    TKey
+	Value  TValue
+	Exists bool
 }
-
-type readRevision[THash comparable] struct {
-	TaskIndex uint64
-	Hash      THash
-}
-
-var errInconsistentRead = errors.New("inconsistent read detected")
 
 type revisionDiffStore[TKey, TValue any, THash comparable] struct {
 	parentStore Store[TKey, TValue]
 	hashingFunc HashingFunc[TKey, THash]
-
-	mu       sync.RWMutex
-	cache    map[THash]revisionDiff[TKey, TValue]
-	diffList *list[THash]
+	cache       map[THash]revisionDiff[TKey, TValue]
+	diffList    *list[THash]
 }
 
 func newRevisionDiffStore[TKey, TValue any, THash comparable](
@@ -48,57 +31,29 @@ func newRevisionDiffStore[TKey, TValue any, THash comparable](
 	}
 }
 
-func (s *revisionDiffStore[TKey, TValue, THash]) Get(key TKey) (uint64, TValue, bool) {
+func (s *revisionDiffStore[TKey, TValue, THash]) Get(key TKey) (TValue, bool) {
 	hash := s.hashingFunc(key)
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	if diff, exists := s.cache[hash]; exists {
-		return diff.TaskIndex, diff.Value, diff.Exists
+		return diff.Value, diff.Exists
 	}
 
 	value, exists := s.parentStore.Get(key)
-	return 0, value, exists
+	return value, exists
 }
 
-func (s *revisionDiffStore[TKey, TValue, THash]) mergeTaskDiff(
-	err error,
-	store *taskDiffStore[TKey, TValue, THash],
-) error {
-	if store.readList != nil {
-		for item := store.readList.Head; item != nil; item = item.Next {
-			for _, r := range item.Slice {
-				if diff := s.cache[r.Hash]; diff.TaskIndex > r.TaskIndex {
-					return errInconsistentRead
-				}
-			}
-		}
-	}
-
-	if err != nil {
-		return nil //nolint:nilerr
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	for item := store.diffList.Head; item != nil; item = item.Next {
+func (s *revisionDiffStore[TKey, TValue, THash]) mergeDiff(
+	diffList *list[THash],
+	cache map[THash]revisionDiff[TKey, TValue],
+) {
+	for item := diffList.Head; item != nil; item = item.Next {
 		for _, hash := range item.Slice {
 			if _, exists := s.cache[hash]; !exists {
 				s.diffList.Append(hash)
 			}
-			diff := store.cache[hash]
-			s.cache[hash] = revisionDiff[TKey, TValue]{
-				TaskIndex: store.taskIndex,
-				Key:       diff.Key,
-				Value:     diff.Value,
-				Exists:    diff.Exists,
-			}
+			s.cache[hash] = cache[hash]
 		}
 	}
-
-	return nil
 }
 
 func (s *revisionDiffStore[TKey, TValue, THash]) applyTo(store Store[TKey, TValue]) {
@@ -115,36 +70,67 @@ func (s *revisionDiffStore[TKey, TValue, THash]) applyTo(store Store[TKey, TValu
 }
 
 type taskDiffStore[TKey, TValue any, THash comparable] struct {
-	taskIndex   uint64
-	parentStore *revisionDiffStore[TKey, TValue, THash]
 	hashingFunc HashingFunc[TKey, THash]
 	cache       map[THash]taskDiff[TKey, TValue]
+
+	parentStore *revisionDiffStore[TKey, TValue, THash]
+	keyList     *list[THash]
 	diffList    *list[THash]
-	readList    *list[readRevision[THash]]
+
+	parentStoreSealed *revisionDiffStore[TKey, TValue, THash]
+	keyListSealed     *list[THash]
+	diffListSealed    *list[THash]
+	sealCallback      func(keyList *list[THash])
 }
 
 func newTaskDiffStore[TKey, TValue any, THash comparable](
-	taskIndex uint64,
 	parentStore *revisionDiffStore[TKey, TValue, THash],
 	hashingFunc HashingFunc[TKey, THash],
+	keyList *list[THash],
 	diffList *list[THash],
-	readList *list[readRevision[THash]],
 ) *taskDiffStore[TKey, TValue, THash] {
-	diffList.Reset()
-	readList.Reset()
-
 	return &taskDiffStore[TKey, TValue, THash]{
-		taskIndex:   taskIndex,
 		parentStore: parentStore,
 		hashingFunc: hashingFunc,
-		cache:       map[THash]taskDiff[TKey, TValue]{},
+		keyList:     keyList,
 		diffList:    diffList,
-		readList:    readList,
 	}
 }
 
 func (s *taskDiffStore[TKey, TValue, THash]) Key(key TKey) KeyStore[TKey, TValue, THash] {
-	return newKeyStore[TKey, TValue, THash](s, key, s.hashingFunc(key))
+	hash := s.hashingFunc(key)
+	s.keyList.Append(hash)
+	return newKeyStore[TKey, TValue, THash](s, key, hash)
+}
+
+func (s *taskDiffStore[TKey, TValue, THash]) Seal() {
+	s.cache = map[THash]taskDiff[TKey, TValue]{}
+	s.parentStoreSealed = s.parentStore
+	s.parentStore = nil
+	s.keyListSealed = s.keyList
+	s.keyList = nil
+	s.diffListSealed = s.diffList
+	s.diffList = nil
+
+	sealCallback := s.sealCallback
+	s.sealCallback = nil
+	sealCallback(s.keyListSealed)
+}
+
+func (s *taskDiffStore[TKey, TValue, THash]) Reset(sealCallback func(keyList *list[THash])) {
+	s.cache = nil
+	if s.parentStore == nil {
+		s.parentStore = s.parentStoreSealed
+	}
+	if s.keyList == nil {
+		s.keyList = s.keyListSealed
+	}
+	s.keyList.Reset()
+	if s.diffList == nil {
+		s.diffList = s.diffListSealed
+	}
+	s.diffList.Reset()
+	s.sealCallback = sealCallback
 }
 
 func (s *taskDiffStore[TKey, TValue, THash]) get(key TKey, hash THash) (TValue, bool) {
@@ -152,63 +138,27 @@ func (s *taskDiffStore[TKey, TValue, THash]) get(key TKey, hash THash) (TValue, 
 		return diff.Value, diff.Exists
 	}
 
-	taskIndex, value, exists := s.parentStore.Get(key)
+	return s.parentStoreSealed.Get(key)
+}
 
-	if s.readList != nil {
-		s.readList.Append(readRevision[THash]{
-			TaskIndex: taskIndex,
-			Hash:      hash,
-		})
+func (s *taskDiffStore[TKey, TValue, THash]) set(key TKey, hash THash, value TValue) {
+	if _, exists := s.cache[hash]; !exists {
+		s.diffListSealed.Append(hash)
 	}
 	s.cache[hash] = taskDiff[TKey, TValue]{
 		Key:    key,
 		Value:  value,
-		Exists: exists,
+		Exists: true,
 	}
-	return value, exists
-}
-
-func (s *taskDiffStore[TKey, TValue, THash]) set(key TKey, hash THash, value TValue) {
-	diff, exists := s.cache[hash]
-	if exists {
-		diff.Value = value
-		diff.Exists = true
-	} else {
-		diff = taskDiff[TKey, TValue]{
-			Key:    key,
-			Value:  value,
-			Exists: true,
-		}
-	}
-	if !diff.Updated {
-		diff.Updated = true
-		s.diffList.Append(hash)
-	}
-	s.cache[hash] = diff
 }
 
 func (s *taskDiffStore[TKey, TValue, THash]) delete(key TKey, hash THash) {
-	diff, exists := s.cache[hash]
-	if exists {
-		var v TValue
-		diff.Value = v
-		diff.Exists = false
-	} else {
-		diff = taskDiff[TKey, TValue]{
-			Key: key,
-		}
+	if _, exists := s.cache[hash]; !exists {
+		s.diffListSealed.Append(hash)
 	}
-	if !diff.Updated {
-		diff.Updated = true
-		s.diffList.Append(hash)
+	s.cache[hash] = taskDiff[TKey, TValue]{
+		Key: key,
 	}
-	s.cache[hash] = diff
-}
-
-func (s *taskDiffStore[TKey, TValue, THash]) Reset() {
-	s.cache = map[THash]taskDiff[TKey, TValue]{}
-	s.readList = nil
-	s.diffList.Reset()
 }
 
 // KeyStore is the store responsible for getting and storing value of single key.
