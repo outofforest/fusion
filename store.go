@@ -1,12 +1,6 @@
 package fusion
 
-type revisionDiff[TKey, TValue any] struct {
-	Key    TKey
-	Value  TValue
-	Exists bool
-}
-
-type taskDiff[TKey, TValue any] struct {
+type diff[TKey, TValue any] struct {
 	Key    TKey
 	Value  TValue
 	Exists bool
@@ -15,7 +9,7 @@ type taskDiff[TKey, TValue any] struct {
 type revisionDiffStore[TKey, TValue any, THash comparable] struct {
 	parentStore Store[TKey, TValue]
 	hashingFunc HashingFunc[TKey, THash]
-	cache       map[THash]revisionDiff[TKey, TValue]
+	cache       map[THash]diff[TKey, TValue]
 	diffList    *list[THash]
 }
 
@@ -26,7 +20,7 @@ func newRevisionDiffStore[TKey, TValue any, THash comparable](
 	return &revisionDiffStore[TKey, TValue, THash]{
 		parentStore: parentStore,
 		hashingFunc: hashingFunc,
-		cache:       map[THash]revisionDiff[TKey, TValue]{},
+		cache:       map[THash]diff[TKey, TValue]{},
 		diffList:    newList[THash](),
 	}
 }
@@ -43,15 +37,14 @@ func (s *revisionDiffStore[TKey, TValue, THash]) Get(key TKey) (TValue, bool) {
 }
 
 func (s *revisionDiffStore[TKey, TValue, THash]) mergeDiff(
-	diffList *list[THash],
-	cache map[THash]revisionDiff[TKey, TValue],
+	store *taskDiffStore[TKey, TValue, THash],
 ) {
-	for item := diffList.Head; item != nil; item = item.Next {
+	for item := store.diffList.Head; item != nil; item = item.Next {
 		for _, hash := range item.Slice {
 			if _, exists := s.cache[hash]; !exists {
 				s.diffList.Append(hash)
 			}
-			s.cache[hash] = cache[hash]
+			s.cache[hash] = store.cache[hash]
 		}
 	}
 }
@@ -70,67 +63,34 @@ func (s *revisionDiffStore[TKey, TValue, THash]) applyTo(store Store[TKey, TValu
 }
 
 type taskDiffStore[TKey, TValue any, THash comparable] struct {
-	hashingFunc HashingFunc[TKey, THash]
-	cache       map[THash]taskDiff[TKey, TValue]
-
 	parentStore *revisionDiffStore[TKey, TValue, THash]
-	keyList     *list[THash]
+	hashingFunc HashingFunc[TKey, THash]
 	diffList    *list[THash]
-
-	parentStoreSealed *revisionDiffStore[TKey, TValue, THash]
-	keyListSealed     *list[THash]
-	diffListSealed    *list[THash]
-	sealCallback      func(keyList *list[THash])
+	cache       map[THash]diff[TKey, TValue]
 }
 
 func newTaskDiffStore[TKey, TValue any, THash comparable](
 	parentStore *revisionDiffStore[TKey, TValue, THash],
 	hashingFunc HashingFunc[TKey, THash],
-	keyList *list[THash],
 	diffList *list[THash],
 ) *taskDiffStore[TKey, TValue, THash] {
 	return &taskDiffStore[TKey, TValue, THash]{
 		parentStore: parentStore,
 		hashingFunc: hashingFunc,
-		keyList:     keyList,
 		diffList:    diffList,
+		cache:       map[THash]diff[TKey, TValue]{},
 	}
 }
 
 func (s *taskDiffStore[TKey, TValue, THash]) Key(key TKey) KeyStore[TKey, TValue, THash] {
-	hash := s.hashingFunc(key)
-	s.keyList.Append(hash)
-	return newKeyStore[TKey, TValue, THash](s, key, hash)
+	return newKeyStore[TKey, TValue, THash](s, key, s.hashingFunc(key))
 }
 
-func (s *taskDiffStore[TKey, TValue, THash]) Seal() {
-	s.cache = map[THash]taskDiff[TKey, TValue]{}
-	s.parentStoreSealed = s.parentStore
-	s.parentStore = nil
-	s.keyListSealed = s.keyList
-	s.keyList = nil
-	s.diffListSealed = s.diffList
-	s.diffList = nil
-
-	sealCallback := s.sealCallback
-	s.sealCallback = nil
-	sealCallback(s.keyListSealed)
-}
-
-func (s *taskDiffStore[TKey, TValue, THash]) Reset(sealCallback func(keyList *list[THash])) {
-	s.cache = nil
-	if s.parentStore == nil {
-		s.parentStore = s.parentStoreSealed
-	}
-	if s.keyList == nil {
-		s.keyList = s.keyListSealed
-	}
-	s.keyList.Reset()
-	if s.diffList == nil {
-		s.diffList = s.diffListSealed
+func (s *taskDiffStore[TKey, TValue, THash]) Reset() {
+	for key := range s.cache {
+		delete(s.cache, key)
 	}
 	s.diffList.Reset()
-	s.sealCallback = sealCallback
 }
 
 func (s *taskDiffStore[TKey, TValue, THash]) get(key TKey, hash THash) (TValue, bool) {
@@ -138,14 +98,14 @@ func (s *taskDiffStore[TKey, TValue, THash]) get(key TKey, hash THash) (TValue, 
 		return diff.Value, diff.Exists
 	}
 
-	return s.parentStoreSealed.Get(key)
+	return s.parentStore.Get(key)
 }
 
 func (s *taskDiffStore[TKey, TValue, THash]) set(key TKey, hash THash, value TValue) {
 	if _, exists := s.cache[hash]; !exists {
-		s.diffListSealed.Append(hash)
+		s.diffList.Append(hash)
 	}
-	s.cache[hash] = taskDiff[TKey, TValue]{
+	s.cache[hash] = diff[TKey, TValue]{
 		Key:    key,
 		Value:  value,
 		Exists: true,
@@ -154,9 +114,9 @@ func (s *taskDiffStore[TKey, TValue, THash]) set(key TKey, hash THash, value TVa
 
 func (s *taskDiffStore[TKey, TValue, THash]) delete(key TKey, hash THash) {
 	if _, exists := s.cache[hash]; !exists {
-		s.diffListSealed.Append(hash)
+		s.diffList.Append(hash)
 	}
-	s.cache[hash] = taskDiff[TKey, TValue]{
+	s.cache[hash] = diff[TKey, TValue]{
 		Key: key,
 	}
 }

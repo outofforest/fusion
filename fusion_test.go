@@ -1,10 +1,8 @@
 package fusion
 
 import (
-	"context"
 	"testing"
 
-	"github.com/outofforest/logger"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -59,17 +57,6 @@ func toHandlerCh(handlers ...HandlerFunc[string, uint64, string]) <-chan Handler
 	return handlerCh
 }
 
-type testingT interface {
-	Cleanup(func())
-}
-
-func newContext(t testingT) context.Context {
-	ctx, cancel := context.WithCancel(logger.WithLogger(context.Background(), logger.New(logger.DefaultConfig)))
-	t.Cleanup(cancel)
-
-	return ctx
-}
-
 type msgSend struct {
 	Sender    string
 	Recipient string
@@ -79,10 +66,9 @@ type msgSend struct {
 }
 
 func sendHandler(msg msgSend) HandlerFunc[string, uint64, string] {
-	return func(ctx context.Context, kf KeyFactory[string, uint64, string]) error {
+	return func(kf KeyFactory[string, uint64, string]) error {
 		senderBalanceKey := kf.Key(msg.Sender)
 		recipientBalanceKey := kf.Key(msg.Recipient)
-		kf.Seal()
 
 		senderBalance, _ := senderBalanceKey.Get()
 		recipientBalance, _ := recipientBalanceKey.Get()
@@ -106,10 +92,8 @@ func sendHandler(msg msgSend) HandlerFunc[string, uint64, string] {
 }
 
 func deleteHandler(err error) HandlerFunc[string, uint64, string] {
-	return func(ctx context.Context, kf KeyFactory[string, uint64, string]) error {
+	return func(kf KeyFactory[string, uint64, string]) error {
 		aliceKey := kf.Key(alice)
-		kf.Seal()
-
 		aliceKey.Delete()
 
 		return err
@@ -118,13 +102,12 @@ func deleteHandler(err error) HandlerFunc[string, uint64, string] {
 
 func TestSingleTask(t *testing.T) {
 	requireT := require.New(t)
-	ctx := newContext(t)
 
 	s := newTestStore()
 	s.Set(alice, 100)
 	s.Set(bob, 50)
 
-	results := do(ctx, requireT, s,
+	results := do(requireT, s,
 		toHandlerCh(
 			sendHandler(msgSend{
 				Sender:    alice,
@@ -148,7 +131,6 @@ func TestSingleTask(t *testing.T) {
 
 func TestSingleTaskError(t *testing.T) {
 	requireT := require.New(t)
-	ctx := newContext(t)
 
 	s := newTestStore()
 	s.Set(alice, 100)
@@ -156,7 +138,7 @@ func TestSingleTaskError(t *testing.T) {
 
 	errTest := errors.New("test error")
 
-	results := do(ctx, requireT, s,
+	results := do(requireT, s,
 		toHandlerCh(
 			sendHandler(msgSend{
 				Sender:    alice,
@@ -180,13 +162,12 @@ func TestSingleTaskError(t *testing.T) {
 
 func TestSingleTaskPanic(t *testing.T) {
 	requireT := require.New(t)
-	ctx := newContext(t)
 
 	s := newTestStore()
 	s.Set(alice, 100)
 	s.Set(bob, 50)
 
-	results := do(ctx, requireT, s,
+	results := do(requireT, s,
 		toHandlerCh(
 			sendHandler(msgSend{
 				Sender:    alice,
@@ -210,13 +191,12 @@ func TestSingleTaskPanic(t *testing.T) {
 
 func TestSingleTaskPanic2(t *testing.T) {
 	requireT := require.New(t)
-	ctx := newContext(t)
 
 	s := newTestStore()
 	s.Set(alice, 100)
 	s.Set(bob, 50)
 
-	results := do(ctx, requireT, s,
+	results := do(requireT, s,
 		toHandlerCh(
 			sendHandler(msgSend{
 				Sender:    alice,
@@ -241,7 +221,6 @@ func TestSingleTaskPanic2(t *testing.T) {
 
 func TestSendThenDelete(t *testing.T) {
 	requireT := require.New(t)
-	ctx := newContext(t)
 
 	s := newTestStore()
 	s.Set(alice, 100)
@@ -253,7 +232,7 @@ func TestSendThenDelete(t *testing.T) {
 		Amount:    10,
 	}
 
-	results := do(ctx, requireT, s,
+	results := do(requireT, s,
 		toHandlerCh(
 			sendHandler(msg),
 			deleteHandler(nil),
@@ -273,7 +252,6 @@ func TestSendThenDelete(t *testing.T) {
 
 func TestDeleteThenSend(t *testing.T) {
 	requireT := require.New(t)
-	ctx := newContext(t)
 
 	s := newTestStore()
 	s.Set(alice, 100)
@@ -285,7 +263,7 @@ func TestDeleteThenSend(t *testing.T) {
 		Amount:    10,
 	}
 
-	results := do(ctx, requireT, s,
+	results := do(requireT, s,
 		toHandlerCh(
 			deleteHandler(nil),
 			sendHandler(msg),
@@ -305,7 +283,6 @@ func TestDeleteThenSend(t *testing.T) {
 
 func TestDeleteWithError(t *testing.T) {
 	requireT := require.New(t)
-	ctx := newContext(t)
 
 	s := newTestStore()
 	s.Set(alice, 100)
@@ -319,7 +296,7 @@ func TestDeleteWithError(t *testing.T) {
 		Amount:    10,
 	}
 
-	results := do(ctx, requireT, s,
+	results := do(requireT, s,
 		toHandlerCh(
 			sendHandler(msg),
 			deleteHandler(errTest),
@@ -341,7 +318,6 @@ func TestManyTasks(t *testing.T) {
 	const count = 100
 
 	requireT := require.New(t)
-	ctx := newContext(t)
 
 	s := newTestStore()
 	s.Set(alice, 100+count*10)
@@ -357,7 +333,7 @@ func TestManyTasks(t *testing.T) {
 		}))
 	}
 
-	results := do(ctx, requireT, s, toHandlerCh(handlers...))
+	results := do(requireT, s, toHandlerCh(handlers...))
 
 	requireT.Equal(expectedResults, results)
 
@@ -371,12 +347,11 @@ func TestManyTasks(t *testing.T) {
 }
 
 func do(
-	ctx context.Context,
 	requireT *require.Assertions,
 	s Store[string, uint64],
 	handlerCh <-chan HandlerFunc[string, uint64, string],
 ) []error {
-	results, err := Run[string, uint64, string](ctx, s, hashingFunc, len(handlerCh), handlerCh)
+	results, err := Run[string, uint64, string](s, hashingFunc, len(handlerCh), handlerCh)
 	requireT.NoError(err)
 
 	return results
