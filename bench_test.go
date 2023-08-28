@@ -7,6 +7,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// go test -bench=. -run=^$ -cpuprofile profile.out
+// go tool pprof -http="localhost:8000" pprofbin ./profile.out
+
 var keys = []string{
 	"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliett", "kilo", "lima", "mike",
 	"november", "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey", "x-ray", "yankee",
@@ -34,10 +37,13 @@ func handler(kf KeyFactory[string, uint64, string]) error {
 	return nil
 }
 
-// go test -bench=. -cpuprofile profile.out
+// go test -bench=. -run=^$ -cpuprofile profile.out
 // go tool pprof -http="localhost:8000" pprofbin ./profile.out
 
 func BenchmarkFusion(b *testing.B) {
+	b.StopTimer()
+	b.ResetTimer()
+
 	const count = 10000
 
 	requireT := require.New(b)
@@ -50,9 +56,10 @@ func BenchmarkFusion(b *testing.B) {
 		handlers = append(handlers, handler)
 	}
 
-	b.ResetTimer()
-	results := do(requireT, s, toHandlerCh(handlers...))
-	b.StopTimer()
-
-	requireT.Equal(expectedResults, results)
+	for bi := 0; bi < b.N; bi++ {
+		b.StartTimer()
+		results := do(requireT, s, toHandlerCh(handlers...))
+		b.StopTimer()
+		requireT.Equal(expectedResults, results)
+	}
 }
